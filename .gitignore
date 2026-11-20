@@ -1,0 +1,12 @@
+# Build output
+/target
+
+# User-supplied music: drop your own track in music/ (see music/README.txt).
+# The tracks themselves are not part of the source tree.
+music/*.mp3
+music/*.ogg
+music/*.flac
+music/*.wav
+music/*.m4a
+music/*.opus
+music/*.aac
