@@ -7,6 +7,9 @@ straight color-cycled scroller, and a freeze-then-blow-away ending. The hack
 is pluggable — today it's a simulated stub so the UI can be developed and
 demoed standalone.
 
+How it works, and why it is built this way, is documented in
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Color
 
 Per the FBR brand rules (`FBR-DOCS/04 brand and design/Colour.md`), the design
