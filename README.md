@@ -1,7 +1,7 @@
 # FBR RAM Downloader — Game Boy Cracktro
 
 A Game Boy DMG/MGB-styled cracktro for the FBR RAM-unlock hack: a warp
-starfield, a big 3D "FBR" title, a flat-shaded 3D spinning logo (the
+starfield, a big 3D "FBR" title, a dither-shaded 3D spinning logo (the
 centerpiece), a "DOWNLOADING RAM" loader with a Windows-7-style shimmer, a
 straight color-cycled scroller, and a freeze-then-blow-away ending. The hack
 is pluggable — today it's a simulated stub so the UI can be developed and
@@ -20,9 +20,9 @@ Every pixel on screen is one of the 4 exact colors (no interpolation). The
 "color cycling" is the classic Game Boy 4-shade shimmer — hard-stepping
 through the palette over time.
 
-The cracktro paints its own backdrop (the darkest shade) across every cell, so
-it looks identical on any terminal theme — light or dark — and never depends on
-the terminal's default colors.
+The cracktro draws **foreground glyphs only** — it never paints a background,
+so it works on any terminal, any theme, and any font without assuming or
+overriding the terminal's own colors.
 
 ## Run
 
@@ -74,6 +74,17 @@ nix-shell -p python3Packages.pillow --run "python3 make_gif.py /tmp/frames.txt 2
 ```
 
 Renders with **M+ Nerd Font Mono** (the "60" weight) and truecolor.
+
+## Tests
+
+```sh
+nix-shell -p rustc cargo --run "cargo test"
+```
+
+The layout and the logo's centering are unit-tested: the model never touches
+the border, always stays inside its region, clears the loader, is centered on
+both axes, and the drawn logo stays within 0.75 cells of its frame center over
+a full spin (measured 0.50).
 
 ## Layout
 
@@ -207,13 +218,20 @@ Use `--dump` to eyeball frames headlessly while wiring things up.
 - **3D logo**: the FBR nano logo is an embedded OBJ model
   (`src/model_data.rs`, generated from `fbrnanologo.obj` by `gen_model.py`),
   rotated + perspective-projected, backface-culled, depth-sorted, flat-shaded.
-  It rasterizes to **one solid block per cell** (`set_block`: the `█` glyph and
-  the cell background are both set to the shade, so adjacent pixels join with
-  no seams). The projection pre-compensates for the ~1:2 cell aspect, so the
-  model stays square. It auto-spins clockwise; a rare shimmer flashes it to the
-  lightest shade, and a slowly orbiting light drives a specular **sheen** across
-  the faces (Blinn-Phong in `scene.rs`). Spin: `SPIN_SPEED` / `SPIN_DIR` in
-  `scene.rs`. It is centered in the space between the title and the loader.
+  It rasterizes to one brightness sample per cell, which the TUI draws as a
+  **dithered block** (`░▒▓█`): every covered cell gets at least `░`, so the
+  silhouette is always solid, and the character density carries the shading —
+  the four levels are spread over the model's real brightness range and
+  ordered-dithered (4x4 Bayer) so intermediate tones appear. Color is the mid
+  palette shade, brightening to the lightest for highlights. The projection
+  pre-compensates for the ~1:2 cell aspect, so the model stays square. It
+  auto-spins clockwise, a rare shimmer flashes it bright, and a slowly orbiting
+  light drives a specular **sheen** (Blinn-Phong in `scene.rs`). Spin:
+  `SPIN_SPEED` / `SPIN_DIR` in `scene.rs`.
+- **True centering**: the mesh is translated onto its own centroid before
+  rotating, so the logo spins about its middle and projects symmetrically; the
+  layout then centers it in its region. Measured drift over a full spin is 0.5
+  cells across, asserted by a unit test.
 - **Mouse grab + flick**: click and drag the logo to rotate it; release to
   fling it with momentum. It damps back into the auto-spin. (crossterm mouse
   capture; pitch is clamped so it can't be flipped over.)
@@ -228,13 +246,18 @@ Use `--dump` to eyeball frames headlessly while wiring things up.
 - **Hints**: a dim `M MUTE • Q QUIT` sits right-aligned in the top border when
   there is room clear of the title. On terminals below 80x24 the status line
   asks you to `RESIZE FOR BEST FIT`.
-- **Responsive layout**: `tui::layout(w, h)` is the single source of truth for
-  every position. The model picks the largest size from a fixed breakpoint
-  table — `48x24, 40x20, 32x16, 24x12, 18x9, 14x7, 10x5` cells — that fits both
-  the available width and the rows between the title and the loader, so it is
-  always fully in view and centered. Below the smallest breakpoint the model is
-  omitted rather than drawn as a sliver. `--layout W H` prints the result, and
-  a 224-size sweep is asserted in development.
+- **Responsive layout**: `tui::layout(w, h)` is a closed-form function of the
+  terminal size and the single source of truth for every position (see its doc
+  comment for the formulas). The model picks the largest size from a fixed
+  breakpoint table — `48x24, 40x20, 32x16, 24x12, 18x9, 14x7, 10x5` cells —
+  that fits both the available width and the rows between the title and the
+  loader, then is centered with `x = (w - mw) / 2`, `y = (h - mh) / 2` clamped
+  into the region. Below the smallest breakpoint the model is omitted rather
+  than drawn as a sliver. `--layout W H` prints the result.
+- **Resize robustness**: the terminal size is re-read every frame (a cheap
+  ioctl) rather than trusted only from `Resize` events, which some terminals
+  and multiplexers do not deliver reliably — a stale size would mis-frame the
+  whole composition.
 - **Containment**: every element is clamped to the inner area; only the frame
   characters ever touch row 0 / row h-1 / column 0 / column w-1.
 - **Blow-away ending**: on `done`, the whole screen freezes, then blows

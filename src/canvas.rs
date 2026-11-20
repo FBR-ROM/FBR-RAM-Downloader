@@ -58,10 +58,6 @@ impl Palette {
 pub struct Cell {
     pub ch: char,
     pub fg: (u8, u8, u8),
-    /// Explicit background color. Used by the model, which is painted as
-    /// background-filled spaces: the terminal fills the whole cell rectangle
-    /// regardless of font metrics, so there are never seams between rows.
-    pub bg: Option<(u8, u8, u8)>,
     pub bold: bool,
 }
 
@@ -72,37 +68,21 @@ pub struct Canvas {
 }
 
 impl Canvas {
-    /// Create a canvas whose every cell carries the palette's darkest shade as
-    /// its background. The cracktro therefore paints its own backdrop and looks
-    /// identical on any terminal theme (light or dark) — it never relies on the
-    /// terminal's default colors, so it is fully self-contained.
+    /// Create a canvas of blank cells. Nothing paints a background: the
+    /// cracktro draws foreground glyphs only, so it renders correctly on any
+    /// terminal, any theme, and any font — it never assumes or overrides the
+    /// terminal's own background.
     pub fn new(w: usize, h: usize, bg: (u8, u8, u8)) -> Self {
         Canvas {
             w,
             h,
-            cells: vec![Cell { ch: ' ', fg: bg, bg: Some(bg), bold: false }; w * h],
+            cells: vec![Cell { ch: ' ', fg: bg, bold: false }; w * h],
         }
     }
 
-    /// Draw a glyph, keeping the cell's backdrop so text never punches a hole
-    /// in the painted background.
     pub fn set(&mut self, x: usize, y: usize, ch: char, fg: (u8, u8, u8), bold: bool) {
         if x < self.w && y < self.h {
-            let bg = self.cells[y * self.w + x].bg;
-            self.cells[y * self.w + x] = Cell { ch, fg, bg, bold };
-        }
-    }
-
-    /// Paint a solid, gapless block: the block glyph *and* the cell
-    /// background are both set to `color`. Terminals differ in how they fill a
-    /// cell — some paint the background across the whole cell rectangle, some
-    /// draw the `█` glyph edge-to-edge — so setting both maximises coverage and
-    /// avoids seams between adjacent blocks. (If a terminal applies cell
-    /// padding/line spacing that neither fills, a hairline seam is unavoidable
-    /// from ANSI alone.)
-    pub fn set_block(&mut self, x: usize, y: usize, color: (u8, u8, u8)) {
-        if x < self.w && y < self.h {
-            self.cells[y * self.w + x] = Cell { ch: '█', fg: color, bg: Some(color), bold: false };
+            self.cells[y * self.w + x] = Cell { ch, fg, bold };
         }
     }
 
@@ -136,7 +116,6 @@ impl Canvas {
     pub fn to_ansi(&self) -> String {
         let mut out = String::with_capacity(self.w * self.h * 3);
         let mut cur_fg: (u8, u8, u8) = (0, 0, 0);
-        let mut cur_bg: Option<(u8, u8, u8)> = None;
         let mut cur_bold = false;
         for y in 0..self.h {
             for x in 0..self.w {
@@ -144,13 +123,6 @@ impl Canvas {
                 if c.fg != cur_fg {
                     out.push_str(&format!("\x1b[38;2;{};{};{}m", c.fg.0, c.fg.1, c.fg.2));
                     cur_fg = c.fg;
-                }
-                if c.bg != cur_bg {
-                    match c.bg {
-                        Some((r, g, b)) => out.push_str(&format!("\x1b[48;2;{};{};{}m", r, g, b)),
-                        None => out.push_str("\x1b[49m"),
-                    }
-                    cur_bg = c.bg;
                 }
                 if c.bold != cur_bold {
                     out.push_str(if c.bold { "\x1b[1m" } else { "\x1b[22m" });

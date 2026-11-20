@@ -1,11 +1,46 @@
 //! FBR cracktro: composes the warp starfield, a big 3D "FBR" title, the
-//! color-cycled 3D logo (half-block pixels), the "DOWNLOADING RAM" bar, a
-//! straight scroller, and a freeze-and-blow-away ending — all in the 4-color
-//! FBR Game Boy palette.
+//! dither-shaded 3D logo, the "DOWNLOADING RAM" loader, a straight scroller,
+//! and a freeze-and-blow-away ending — all in the 4-color FBR Game Boy palette.
+//! Foreground glyphs only: no background is ever painted.
 
 use crate::canvas::{Canvas, Cell, Palette};
 use crate::hack::HackState;
 use crate::scene::{ModelFrame, Starfield};
+
+/// Density ramp for the model: lightest coverage first. Every covered sample
+/// gets at least `░`, so the model's silhouette is always solid (no gaps, no
+/// faint faces) and the character density carries the shading.
+const DITHER: &[char] = &['░', '▒', '▓', '█'];
+
+/// Brightness range the model actually produces: ambient floor .. full light.
+/// The density ramp is spread across this range so all four levels get used.
+const MODEL_MIN_BRIGHT: f32 = 0.15;
+const MODEL_MAX_BRIGHT: f32 = 1.0;
+
+/// 4x4 ordered-dither (Bayer) threshold matrix, 0..15. A box only has a few
+/// face brightnesses, so quantizing straight to four levels looks flat; this
+/// dithers between the two nearest levels by position, which produces smooth
+/// intermediate tones out of the same four characters.
+const BAYER: [[u8; 4]; 4] = [
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5],
+];
+
+/// The block character for a brightness sample at cell (`x`, `y`): sparse `░`
+/// for dark faces up to solid `█` for bright ones, with ordered dithering
+/// between levels.
+fn dither_char(bright: f32, x: usize, y: usize) -> char {
+    let t = ((bright - MODEL_MIN_BRIGHT) / (MODEL_MAX_BRIGHT - MODEL_MIN_BRIGHT))
+        .clamp(0.0, 1.0);
+    let scaled = t * (DITHER.len() - 1) as f32;
+    let lower = scaled.floor() as usize;
+    let frac = scaled - lower as f32;
+    let threshold = BAYER[y % 4][x % 4] as f32 / 16.0;
+    let level = if frac > threshold { lower + 1 } else { lower };
+    DITHER[level.min(DITHER.len() - 1)]
+}
 
 const BAR_WIDTH: usize = 44;
 
@@ -68,29 +103,58 @@ pub struct Layout {
     pub too_small: bool,
 }
 
-/// Compute the responsive layout for a `w` x `h` terminal. Pure function of
-/// the size, so it can be unit-checked and printed with `--layout`.
+/// Rows reserved below the title (title glyphs + drop shadow).
+const SHADOW_ROWS: usize = 2;
+/// Rows in the bottom loader block (label + bar + status).
+const LOADER_ROWS: usize = 3;
+/// Blank rows between the loader block and the scroller.
+const BREATH_ROWS: usize = 1;
+
+/// Compute the responsive layout for a `w` x `h` terminal.
+///
+/// The whole geometry is a closed-form function of the terminal size, in cell
+/// coordinates, with row 0 / col 0 at the top-left:
+///
+/// ```text
+///   borders      row 0, row h-1, col 0, col w-1
+///   title        rows 1 ..= 1 + TITLE_ROWS + SHADOW_ROWS
+///   loader       rows h-5 ..= h-3   (label, bar, status)
+///   breathing    row  h-2
+///   scroller     row  h-1
+///   region       rows region_top ..= region_bottom
+///                  region_top    = 1 + TITLE_ROWS + SHADOW_ROWS
+///                  region_bottom = h - 1 - BREATH_ROWS - LOADER_ROWS
+///   model        largest breakpoint (mw, mh) with
+///                  mw <= w - 4   and   mh <= region_h
+///                placed at x = (w - mw) / 2, y = clamp((h - mh) / 2, ...)
+/// ```
+///
+/// `x = (w - mw) / 2` is exact centering in the frame: the leftover space
+/// `w - mw` is split into a left margin of `(w - mw) / 2` and a right margin of
+/// `w - mw - (w - mw) / 2`, which differ by at most one cell. The same holds
+/// vertically, except `y` is clamped into the model region so the model can
+/// never reach the title or the loader on short terminals.
+///
+/// Pure function of the size: unit-tested below and printable with `--layout`.
 pub fn layout(w: usize, h: usize) -> Layout {
     let w = w.max(3);
     let h = h.max(3);
-    let inner_w = w.saturating_sub(2);
 
-    // The loader block is anchored to the bottom: label, bar, status, then a
-    // blank breathing row, then the scroller on the bottom border.
-    let label_row = h.saturating_sub(5).max(2);
-    let bar_row = label_row + 1;
-    let status_row = bar_row + 1;
+    // --- bottom loader block, anchored to the scroller ---------------------
     let scroller_row = h - 1;
+    let label_row = h - 1 - BREATH_ROWS - LOADER_ROWS; // h - 5
+    let bar_row = label_row + 1;
+    let status_row = label_row + 2;
 
-    // The model lives between the title (+ shadow) and the loader.
-    let region_top = (1 + TITLE_ROWS + 2).min(h.saturating_sub(2)).max(1);
+    // --- model region, between the title and the loader -------------------
+    let region_top = (1 + TITLE_ROWS + SHADOW_ROWS).min(h.saturating_sub(2)).max(1);
     let region_bottom = label_row.saturating_sub(1).max(region_top);
     let region_h = region_bottom - region_top + 1;
 
-    // Largest breakpoint that fits both ways. If even the smallest does not
-    // fit, the model is omitted (0x0) rather than drawn as a sliver — the rest
-    // of the composition still renders, and nothing ever bleeds.
-    let avail_w = inner_w.saturating_sub(2);
+    // --- largest breakpoint that fits both ways ---------------------------
+    // Horizontal budget: the inner width minus one cell of margin each side,
+    // so a centered model can never touch the side borders (mw <= w - 4).
+    let avail_w = w.saturating_sub(4);
     let mut model_w = 0usize;
     let mut model_h = 0usize;
     for &(bw, bh) in MODEL_BREAKPOINTS {
@@ -101,10 +165,13 @@ pub fn layout(w: usize, h: usize) -> Layout {
         }
     }
 
-    let model_x = 1 + inner_w.saturating_sub(model_w) / 2;
-    let model_y = region_top + (region_h.saturating_sub(model_h)) / 2;
+    // --- placement: exact centering, clamped into the region --------------//
+    let model_x = (w - model_w) / 2;
+    let centered_y = (h - model_h) / 2;
+    let lowest_y = region_bottom + 1 - model_h; // keeps the model above the loader
+    let model_y = centered_y.clamp(region_top, lowest_y.max(region_top));
 
-    // Title (18 chars) + hints (16) + margins need roughly 40 columns.
+    // Title (18) + hints (16) + margins need roughly 46 columns.
     let show_hint = w >= 46;
     let too_small = w < 80 || h < 24;
 
@@ -121,6 +188,124 @@ pub fn layout(w: usize, h: usize) -> Layout {
         scroller_row,
         show_hint,
         too_small,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every size worth defending: tiny, small, the documented default, the
+    /// author's tall 81x95, and huge.
+    const SIZES: &[(usize, usize)] = &[
+        (20, 6), (24, 8), (30, 10), (40, 12), (40, 20), (60, 20), (70, 24),
+        (80, 24), (81, 95), (100, 30), (120, 40), (140, 45), (160, 50),
+        (200, 60), (240, 120), (400, 200),
+    ];
+
+    /// The model must always sit fully inside the frame's inner area.
+    #[test]
+    fn model_never_touches_the_border() {
+        for &(w, h) in SIZES {
+            let l = layout(w, h);
+            if l.model_w == 0 {
+                continue;
+            }
+            assert!(l.model_x >= 1, "{w}x{h}: model_x {} < 1", l.model_x);
+            assert!(
+                l.model_x + l.model_w <= w - 1,
+                "{w}x{h}: model right edge {} >= {}",
+                l.model_x + l.model_w,
+                w - 1
+            );
+            assert!(l.model_y >= 1, "{w}x{h}: model_y {} < 1", l.model_y);
+            assert!(
+                l.model_y + l.model_h <= h - 1,
+                "{w}x{h}: model bottom edge {} >= {}",
+                l.model_y + l.model_h,
+                h - 1
+            );
+        }
+    }
+
+    /// The model must always sit inside its region: below the title, above the
+    /// loader.
+    #[test]
+    fn model_stays_in_its_region() {
+        for &(w, h) in SIZES {
+            let l = layout(w, h);
+            if l.model_w == 0 {
+                continue;
+            }
+            assert!(l.model_y >= l.region_top, "{w}x{h}: model above region");
+            assert!(
+                l.model_y + l.model_h - 1 <= l.region_bottom,
+                "{w}x{h}: model below region"
+            );
+        }
+    }
+
+    /// Centering is exact: the leftover space splits into margins that differ
+    /// by at most one cell, on both axes, unless the vertical clamp is active
+    /// (short terminals, where the model fills its region instead).
+    #[test]
+    fn model_is_centered() {
+        for &(w, h) in SIZES {
+            let l = layout(w, h);
+            if l.model_w == 0 {
+                continue;
+            }
+            let left = l.model_x;
+            let right = w - l.model_w - left;
+            assert!(
+                left.abs_diff(right) <= 1,
+                "{w}x{h}: not h-centered {left} vs {right}"
+            );
+
+            // Vertically: centered on the frame, or flush in the region when
+            // the clamp is active (the model then fills its region exactly).
+            let top = l.model_y;
+            let bottom = h - l.model_h - top;
+            let region_h = l.region_bottom - l.region_top + 1;
+            let clamped = l.model_h >= region_h;
+            if clamped {
+                assert_eq!(top, l.region_top, "{w}x{h}: clamped model not flush top");
+            } else {
+                assert!(
+                    top.abs_diff(bottom) <= 1,
+                    "{w}x{h}: not v-centered {top} vs {bottom}"
+                );
+            }
+        }
+    }
+
+    /// The bottom block is always ordered and inside the border.
+    #[test]
+    fn loader_block_is_ordered_and_inside() {
+        for &(w, h) in SIZES {
+            let l = layout(w, h);
+            assert!(l.label_row < l.bar_row, "{w}x{h}: label/bar out of order");
+            assert!(l.bar_row < l.status_row, "{w}x{h}: bar/status out of order");
+            assert!(l.status_row < l.scroller_row, "{w}x{h}: status/scroller out of order");
+            assert_eq!(l.scroller_row, h - 1, "{w}x{h}: scroller off the border");
+        }
+    }
+
+    /// The model never overlaps the loader block.
+    #[test]
+    fn model_clears_the_loader() {
+        for &(w, h) in SIZES {
+            let l = layout(w, h);
+            if l.model_w == 0 {
+                continue;
+            }
+            assert!(
+                l.model_y + l.model_h <= l.label_row,
+                "{w}x{h}: model bottom {} overlaps label {}",
+                l.model_y + l.model_h,
+                l.label_row
+            );
+        }
     }
 }
 
@@ -316,16 +501,17 @@ impl Cracktro {
         self.big_title(&mut cv, "FBR", 1, t);
 
         // 4. 3D logo — centered in the region between the title and the loader
-        //    (see `layout`). Each pixel is a solid block (glyph + background
-        //    both set to the shade), flat-shaded to the exact palette colors,
-        //    so adjacent pixels join with no seams. Uncovered cells stay
-        //    transparent so the starfield shows around the model. The model is
-        //    always fully inside the region: the breakpoint chosen by `layout`
-        //    guarantees it fits and never bleeds.
+        //    (see `layout`, which guarantees it fits and never bleeds). Each
+        //    sample is a shaded block: the density ramp picks the glyph (dark
+        //    faces `░`, bright faces `█`) so the silhouette is always solid,
+        //    and the color is the palette's mid shade, brightening to the
+        //    lightest for a highlight. Foreground only, so it works on any
+        //    terminal. Uncovered samples stay blank so the starfield shows
+        //    around the model.
         for cy in 0..lay.model_h {
             let row = lay.model_y + cy;
-            if row <= lay.region_top.saturating_sub(1) || row >= h - 1 {
-                continue; // never paint over the border rows
+            if row >= h {
+                break;
             }
             for cx in 0..lay.model_w {
                 let idx = cy * logo.w + cx;
@@ -336,7 +522,9 @@ impl Cracktro {
                 if bright < 0.04 {
                     continue;
                 }
-                cv.set_block(lay.model_x + cx, row, p.shade(bright));
+                let col = if bright > 0.85 { p.colors[0] } else { p.colors[1] };
+                let ch = dither_char(bright, cx, cy);
+                cv.set(lay.model_x + cx, row, ch, col, bright > 0.7);
             }
         }
 

@@ -212,8 +212,23 @@ fn run_loop(
     let mut last_mouse: Option<(u16, u16)> = None;
 
     loop {
-        // Drain all pending events (keeps the frame rate steady).
+        // Trust the terminal's real size every frame. Some terminals and
+        // multiplexers do not deliver resize events reliably, and a stale size
+        // would leave the composition mis-framed. `terminal::size` is a cheap
+        // ioctl, so polling it here keeps the layout always correct.
         let mut resized = false;
+        if let Ok((tw, th)) = crossterm::terminal::size() {
+            let (tw, th) = (tw as usize, th as usize);
+            if (tw, th) != *size && tw > 0 && th > 0 {
+                *size = (tw, th);
+                let (sw, sh) = scene_size(tw, th);
+                scene.set_size(sw, sh);
+                cracktro.set_size(tw, th);
+                resized = true;
+            }
+        }
+
+        // Drain all pending events (keeps the frame rate steady).
         while event::poll(Duration::from_millis(0))? {
             match event::read()? {
                 Event::Key(k) if k.code == KeyCode::Char('q') => {

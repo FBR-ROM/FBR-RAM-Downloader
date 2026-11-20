@@ -1,11 +1,14 @@
-//! 3D scene: renders the FBR nano logo (embedded OBJ model) as full-block
-//! pixels (`█`, one per cell, flat-shaded to the palette) with a
+//! 3D scene: renders the FBR nano logo (embedded OBJ model) with a
 //! painter's-algorithm software rasterizer, plus a warp starfield.
 //!
-//! Cells are about twice as tall as wide, so pixel space is 2:1: the
-//! projection pre-compensates in y, and the layout gives the model twice as
-//! many cell columns as rows — a physically square model at any size, with no
-//! glyph gaps.
+//! The model rasterizes one brightness sample per cell. The TUI turns each
+//! sample into a shaded block (see `tui::dither_char`): every covered cell gets
+//! at least a `░`, so the silhouette is always solid, and the density of the
+//! block character carries the shading. Foreground glyphs only — no background
+//! is ever painted, so it renders on any terminal and any theme.
+//!
+//! Cells are about twice as tall as wide, so the projection pre-compensates in
+//! y to keep the model square.
 //!
 //! The model auto-spins clockwise. The user can grab it with the mouse and
 //! flick it (drag to rotate, release to fling with momentum). A rare shimmer
@@ -91,8 +94,8 @@ impl Frame {
     }
 }
 
-/// The rendered model: one brightness per cell. `w` by `h` cells, row-major;
-/// 0.0 = uncovered.
+/// The rendered model: one brightness sample per cell. `w` by `h` cells,
+/// row-major; 0.0 = uncovered (leave the cell blank).
 #[derive(Clone)]
 pub struct ModelFrame {
     pub w: usize,
@@ -118,6 +121,10 @@ impl ModelFrame {
 pub struct Scene {
     w: usize,
     h: usize,
+    /// Centroid of the model's vertices. The mesh is translated by `-center`
+    /// before rotating, so the logo spins about its true center and projects
+    /// symmetrically about the middle of its frame.
+    center: Vec3,
     yaw: f32,
     pitch: f32,
     vyaw: f32,
@@ -134,6 +141,7 @@ impl Scene {
         Scene {
             w: w.max(8),
             h: h.max(6),
+            center: model_centroid(),
             yaw: 0.0,
             pitch: 0.0,
             vyaw: 0.0,
@@ -213,10 +221,10 @@ impl Scene {
         (x * (1.0 - x) * 4.0).min(1.0) // triangle pulse
     }
 
-    /// Render the model to a pixel frame (one pixel per cell).
+    /// Render the model to a shaded sample frame (one sample per cell).
     pub fn render(&self) -> ModelFrame {
-        // Pixel space: one pixel per cell. Cells are ~1:2 (w:h), so pixel
-        // space is 2:1 — the projection halves y to keep the model square.
+        // One sample per cell. Cells are ~1:2 (w:h), so the projection halves
+        // y to keep the model square.
         let pw = self.w;
         let ph = self.h;
         let mut frame = ModelFrame::new(pw, ph);
@@ -241,6 +249,11 @@ impl Scene {
         let mut wz: Vec<f32> = Vec::with_capacity(VERTS.len());
         let mut world: Vec<Vec3> = Vec::with_capacity(VERTS.len());
         for &(vx, vy, vz) in VERTS {
+            // Translate the mesh so its centroid sits on the origin: the model
+            // then projects symmetrically about the frame's center.
+            let vx = vx - self.center.x;
+            let vy = vy - self.center.y;
+            let vz = vz - self.center.z;
             // Yaw (around Y).
             let x1 = vx * ca + vz * sa;
             let z1 = -vx * sa + vz * ca;
@@ -316,6 +329,41 @@ impl Scene {
     }
 }
 
+/// The bounding-box center of the drawn (non-blank) samples, in cells.
+#[cfg(test)]
+fn drawn_center(frame: &ModelFrame) -> Option<(f32, f32)> {
+    let (mut minx, mut maxx, mut miny, mut maxy) = (usize::MAX, 0usize, usize::MAX, 0usize);
+    let mut any = false;
+    for y in 0..frame.h {
+        for x in 0..frame.w {
+            if frame.pix[y * frame.w + x] > 0.04 {
+                any = true;
+                minx = minx.min(x);
+                maxx = maxx.max(x);
+                miny = miny.min(y);
+                maxy = maxy.max(y);
+            }
+        }
+    }
+    any.then(|| {
+        (
+            (minx + maxx) as f32 / 2.0,
+            (miny + maxy) as f32 / 2.0,
+        )
+    })
+}
+
+/// The centroid of the model's vertices, computed once. Used to translate the
+/// mesh onto the origin so the logo is centered as it spins.
+fn model_centroid() -> Vec3 {
+    let mut sum = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    for &(x, y, z) in VERTS {
+        sum = sum.add(Vec3 { x, y, z });
+    }
+    let n = VERTS.len().max(1) as f32;
+    Vec3 { x: sum.x / n, y: sum.y / n, z: sum.z / n }
+}
+
 fn edge(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
     (px - b.0) * (a.1 - b.1) - (a.0 - b.0) * (py - b.1)
 }
@@ -341,6 +389,41 @@ fn rasterize_tri(frame: &mut ModelFrame, pts: [(f32, f32); 3], bright: f32) {
                 frame.set(x as usize, y as usize, bright);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The logo must stay centered in its own frame all the way around the
+    /// spin: the drawn silhouette's bounding-box center tracks the frame
+    /// center (the mesh is translated onto its centroid for this reason).
+    #[test]
+    fn logo_stays_centered_while_spinning() {
+        let (w, h) = (48usize, 24usize);
+        let mut scene = Scene::new(w, h);
+        let cx = (w - 1) as f32 / 2.0;
+        let cy = (h - 1) as f32 / 2.0;
+        let mut worst_x = 0.0f32;
+        let mut worst_y = 0.0f32;
+        for _ in 0..64 {
+            for _ in 0..4 {
+                scene.advance(0.05);
+            }
+            if let Some((bx, by)) = drawn_center(&scene.render()) {
+                worst_x = worst_x.max((bx - cx).abs());
+                worst_y = worst_y.max((by - cy).abs());
+            }
+        }
+        // A flat box's silhouette shifts as it turns edge-on: measured drift is
+        // 0.50 cells across, so anything above 0.75 means the mesh is
+        // off-center horizontally. Vertically the fixed camera tilt reveals the
+        // top face, which lifts the silhouette by up to a cell (measured 1.00)
+        // — that is the 3D pose, not a placement error, so it gets a looser
+        // bound.
+        assert!(worst_x <= 0.75, "logo drifts {worst_x:.2} cells horizontally");
+        assert!(worst_y <= 1.25, "logo drifts {worst_y:.2} cells vertically");
     }
 }
 
