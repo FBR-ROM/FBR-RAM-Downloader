@@ -82,9 +82,9 @@ nix-shell -p rustc cargo --run "cargo test"
 ```
 
 The layout and the logo's centering are unit-tested: the model never touches
-the border, always stays inside its region, clears the loader, is centered on
-both axes, and the drawn logo stays within 0.75 cells of its frame center over
-a full spin (measured 0.50).
+the border, always stays inside its region, clears the loader, is horizontally
+centered and sits below centre by exactly `MODEL_V_BIAS`, and the drawn logo
+stays within 0.75 cells of its frame center over a full spin (measured 0.50).
 
 ## Layout
 
@@ -228,10 +228,13 @@ Use `--dump` to eyeball frames headlessly while wiring things up.
   auto-spins clockwise, a rare shimmer flashes it bright, and a slowly orbiting
   light drives a specular **sheen** (Blinn-Phong in `scene.rs`). Spin:
   `SPIN_SPEED` / `SPIN_DIR` in `scene.rs`.
-- **True centering**: the mesh is translated onto its own centroid before
-  rotating, so the logo spins about its middle and projects symmetrically; the
-  layout then centers it in its region. Measured drift over a full spin is 0.5
-  cells across, asserted by a unit test.
+- **Centering**: the mesh is translated onto its own centroid before rotating,
+  so the logo spins about its middle and projects symmetrically. Horizontally
+  the layout centers it exactly; vertically it is placed deliberately **below**
+  centre by `MODEL_V_BIAS` in `tui.rs` (0.5 = dead centre, 1.0 = flush above the
+  loader), because the lit top face draws the eye upward — raise the constant to
+  move the logo further down. Measured horizontal drift over a full spin is 0.5
+  cells, asserted by a unit test.
 - **Mouse grab + flick**: click and drag the logo to rotate it; release to
   fling it with momentum. It damps back into the auto-spin. (crossterm mouse
   capture; pitch is clamped so it can't be flipped over.)

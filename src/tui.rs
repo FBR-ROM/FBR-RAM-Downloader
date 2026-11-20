@@ -103,6 +103,16 @@ pub struct Layout {
     pub too_small: bool,
 }
 
+/// Vertical placement of the logo inside its region, as a fraction of the
+/// leftover space (0.0 = flush under the title, 0.5 = dead centre, 1.0 = flush
+/// above the loader).
+///
+/// It sits deliberately below centre: the model's lit top face draws the eye
+/// upward and there is more empty space below it than above, so a geometric
+/// centre reads as "too high". Raise this number to move the logo further
+/// down, lower it to move it up.
+const MODEL_V_BIAS: f32 = 0.60;
+
 /// Rows reserved below the title (title glyphs + drop shadow).
 const SHADOW_ROWS: usize = 2;
 /// Rows in the bottom loader block (label + bar + status).
@@ -126,14 +136,16 @@ const BREATH_ROWS: usize = 1;
 ///                  region_bottom = h - 1 - BREATH_ROWS - LOADER_ROWS
 ///   model        largest breakpoint (mw, mh) with
 ///                  mw <= w - 4   and   mh <= region_h
-///                placed at x = (w - mw) / 2, y = clamp((h - mh) / 2, ...)
+///                placed at x = (w - mw) / 2   (exact horizontal centering)
+///                          y = region_top + (region_h - mh) * MODEL_V_BIAS
 /// ```
 ///
 /// `x = (w - mw) / 2` is exact centering in the frame: the leftover space
 /// `w - mw` is split into a left margin of `(w - mw) / 2` and a right margin of
-/// `w - mw - (w - mw) / 2`, which differ by at most one cell. The same holds
-/// vertically, except `y` is clamped into the model region so the model can
-/// never reach the title or the loader on short terminals.
+/// `w - mw - (w - mw) / 2`, which differ by at most one cell.
+///
+/// Vertically the model is biased below centre by `MODEL_V_BIAS` and clamped
+/// into the region, so it can never reach the title or the loader.
 ///
 /// Pure function of the size: unit-tested below and printable with `--layout`.
 pub fn layout(w: usize, h: usize) -> Layout {
@@ -165,11 +177,12 @@ pub fn layout(w: usize, h: usize) -> Layout {
         }
     }
 
-    // --- placement: exact centering, clamped into the region --------------//
+    // --- placement: exact horizontal centering, biased vertically ----------//
     let model_x = (w - model_w) / 2;
-    let centered_y = (h - model_h) / 2;
+    let leftover = region_h.saturating_sub(model_h) as f32;
+    let offset = (leftover * MODEL_V_BIAS).round() as usize;
     let lowest_y = region_bottom + 1 - model_h; // keeps the model above the loader
-    let model_y = centered_y.clamp(region_top, lowest_y.max(region_top));
+    let model_y = (region_top + offset).min(lowest_y.max(region_top));
 
     // Title (18) + hints (16) + margins need roughly 46 columns.
     let show_hint = w >= 46;
@@ -245,11 +258,12 @@ mod tests {
         }
     }
 
-    /// Centering is exact: the leftover space splits into margins that differ
-    /// by at most one cell, on both axes, unless the vertical clamp is active
-    /// (short terminals, where the model fills its region instead).
+    /// Horizontally the leftover space splits into margins that differ by at
+    /// most one cell. Vertically the model is biased below centre by
+    /// `MODEL_V_BIAS` (so it reads as centred under its lit top face) and must
+    /// stay within the region.
     #[test]
-    fn model_is_centered() {
+    fn model_is_centered_and_sits_low() {
         for &(w, h) in SIZES {
             let l = layout(w, h);
             if l.model_w == 0 {
@@ -262,20 +276,18 @@ mod tests {
                 "{w}x{h}: not h-centered {left} vs {right}"
             );
 
-            // Vertically: centered on the frame, or flush in the region when
-            // the clamp is active (the model then fills its region exactly).
-            let top = l.model_y;
-            let bottom = h - l.model_h - top;
             let region_h = l.region_bottom - l.region_top + 1;
-            let clamped = l.model_h >= region_h;
-            if clamped {
-                assert_eq!(top, l.region_top, "{w}x{h}: clamped model not flush top");
-            } else {
-                assert!(
-                    top.abs_diff(bottom) <= 1,
-                    "{w}x{h}: not v-centered {top} vs {bottom}"
-                );
-            }
+            let leftover = region_h.saturating_sub(l.model_h);
+            let centred = l.region_top + leftover / 2;
+            let biased = l.region_top + (leftover as f32 * MODEL_V_BIAS).round() as usize;
+            let lowest = l.region_bottom + 1 - l.model_h;
+            let expected = biased.min(lowest.max(l.region_top));
+            assert_eq!(l.model_y, expected, "{w}x{h}: vertical placement");
+            assert!(
+                l.model_y >= centred,
+                "{w}x{h}: model sits above centre ({} < {centred})",
+                l.model_y
+            );
         }
     }
 
