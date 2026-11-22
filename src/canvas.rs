@@ -52,6 +52,27 @@ impl Palette {
         let shift = (((t * 0.5 + phase).rem_euclid(1.0)) * 4.0) as usize;
         self.colors[(base + shift) % 4]
     }
+
+    /// Return a copy of the palette with the shade that would be invisible
+    /// against the terminal background swapped for the next shade in.
+    ///
+    /// The cracktro is foreground-only, so a glyph drawn in a color that
+    /// matches the background simply vanishes. In a dark terminal the darkest
+    /// shade (index 3) is near-black and disappears; in a light terminal the
+    /// lightest shade (index 0) is near-white and disappears. Every text color
+    /// in the TUI derives from `self.colors`, so remapping the array once here
+    /// keeps all of them visible.
+    pub fn remap_for(&self, dark: bool) -> Self {
+        let mut colors = self.colors;
+        if dark {
+            // Dark background: the darkest shade is invisible -> use shade 2.
+            colors[3] = colors[2];
+        } else {
+            // Light background: the lightest shade is invisible -> use shade 1.
+            colors[0] = colors[1];
+        }
+        Palette { colors }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -136,5 +157,31 @@ impl Canvas {
         }
         out.push_str("\x1b[0m");
         out
+    }
+
+    /// Write the canvas into a ratatui [`Buffer`], which the `Terminal` diffs
+    /// against its previous frame and flushes to the terminal. Only non-blank
+    /// cells are written: the buffer is already blank, and skipping them keeps
+    /// the diff small. The buffer must be at least `w` x `h`; out-of-range
+    /// cells are dropped (the terminal is never smaller than the canvas).
+    pub fn to_buffer(&self, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::style::{Color, Modifier};
+        for y in 0..self.h.min(buf.area.height as usize) {
+            for x in 0..self.w.min(buf.area.width as usize) {
+                let c = &self.cells[y * self.w + x];
+                if c.ch == ' ' {
+                    continue;
+                }
+                if let Some(cell) = buf.cell_mut((x as u16, y as u16)) {
+                    cell.set_char(c.ch);
+                    cell.set_fg(Color::Rgb(c.fg.0, c.fg.1, c.fg.2));
+                    cell.modifier = if c.bold {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    };
+                }
+            }
+        }
     }
 }

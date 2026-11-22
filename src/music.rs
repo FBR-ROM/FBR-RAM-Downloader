@@ -1,27 +1,38 @@
-//! Optional background music for the cracktro.
+//! Self-contained background music for the cracktro.
 //!
-//! Looks for a track in `music/` (or an explicit `--music FILE`) and plays it
-//! through the first available player, looping. If no player is installed it
-//! silently no-ops (the cracktro still runs). Stopped cleanly on exit.
+//! Decodes and plays a track from `music/` (or an explicit `--music FILE`)
+//! in-process via [`rodio`], looping. No external player (mpv/ffplay) is
+//! required — the binary is fully self-contained. If no audio device is
+//! available it silently no-ops (the cracktro still runs). Stopped cleanly on
+//! exit.
 
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 
-const PLAYERS: &[&str] = &["mpv", "ffplay", "paplay", "aplay"];
+use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, source::Source};
+
 const EXTS: &[&str] = &["mp3", "ogg", "flac", "wav", "m4a", "opus", "aac"];
 
 pub struct Music {
-    child: Option<Child>,
-    /// The resolved track, remembered so the player can be restarted after a
+    /// Kept alive for the duration of playback; dropping it stops the audio
+    /// thread.
+    stream: Option<OutputStream>,
+    /// Drives the looping source; dropping it stops the track.
+    sink: Option<Sink>,
+    /// The resolved track, remembered so playback can be restarted after a
     /// toggle. None when there is no track (or `--no-music`).
     track: Option<PathBuf>,
+    /// Whether the sink is currently playing (vs. paused).
+    playing: bool,
 }
 
 impl Music {
-    /// A no-op music handle (no track / no player).
+    /// A no-op music handle (no track / no audio device).
     pub fn none() -> Self {
-        Music { child: None, track: None }
+        Music { stream: None, sink: None, track: None, playing: false }
     }
+
     /// Resolve the track to play: explicit path, else the first audio file in
     /// `music/`. Returns None if nothing is found.
     pub fn resolve(explicit: Option<&str>) -> Option<PathBuf> {
@@ -53,83 +64,85 @@ impl Music {
         entries.into_iter().next()
     }
 
-    /// Start playing `path` (looped) if a player is available.
+    /// Start playing `path` (looped) on the default audio device.
     pub fn start(path: &Path) -> Self {
-        let mut m = Music { child: None, track: Some(path.to_path_buf()) };
+        let mut m = Music { stream: None, sink: None, track: Some(path.to_path_buf()), playing: false };
         m.spawn();
         m
     }
 
-    /// Spawn the player for the remembered track (no-op without one).
+    /// Open the audio device and start the looping track (no-op without one).
     fn spawn(&mut self) {
         let Some(path) = self.track.clone() else {
             return;
         };
         let path = path.as_path();
-        for player in PLAYERS {
-            if which(player).is_none() {
-                continue;
+
+        // Open the default output stream. If there's no audio device this
+        // fails and we no-op (the cracktro still runs).
+        let stream = match OutputStreamBuilder::open_default_stream() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("music: no audio device ({e}); running without music");
+                return;
             }
-            let p = path.to_string_lossy().into_owned();
-            let args = match *player {
-                "mpv" => vec![
-                    "--loop",
-                    "inf",
-                    "--really-quiet",
-                    "--no-video",
-                    p.as_str(),
-                ],
-                "ffplay" => vec![
-                    "-loop",
-                    "-1",
-                    "-nodisp",
-                    "-autoexit",
-                    "-loglevel",
-                    "quiet",
-                    p.as_str(),
-                ],
-                // paplay / aplay: no loop flag; we re-spawn on exit.
-                _ => vec![p.as_str()],
-            };
-            match Command::new(player)
-                .args(&args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                Ok(child) => {
-                    eprintln!("music: playing {} via {player}", path.display());
-                    self.child = Some(child);
-                    return;
-                }
-                Err(e) => eprintln!("music: failed to start {player}: {e}"),
+        };
+
+        // Decode the file and loop it.
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("music: cannot open {}: {e}", path.display());
+                return;
             }
-        }
-        eprintln!(
-            "music: no player found (tried {}); install mpv or ffplay",
-            PLAYERS.join(", ")
-        );
+        };
+        let decoder = match Decoder::try_from(BufReader::new(file)) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("music: cannot decode {}: {e}", path.display());
+                return;
+            }
+        };
+
+        let sink = Sink::connect_new(&stream.mixer());
+        sink.append(decoder.repeat_infinite());
+        sink.play();
+
+        eprintln!("music: playing {} (in-process)", path.display());
+        self.stream = Some(stream);
+        self.sink = Some(sink);
+        self.playing = true;
     }
 
-    /// Toggle playback: stop if playing, restart the remembered track if not.
+    /// Toggle playback: pause if playing, resume if paused, start if stopped.
     /// A no-op when there is no track (no `music/` file or `--no-music`).
     pub fn toggle(&mut self) {
-        if self.child.is_some() {
-            self.stop();
-            eprintln!("music: off");
-        } else if self.track.is_some() {
-            self.spawn();
-            eprintln!("music: on");
+        match &self.sink {
+            Some(sink) => {
+                if self.playing {
+                    sink.pause();
+                    self.playing = false;
+                    eprintln!("music: off");
+                } else {
+                    sink.play();
+                    self.playing = true;
+                    eprintln!("music: on");
+                }
+            }
+            None if self.track.is_some() => {
+                self.spawn();
+            }
+            None => {}
         }
     }
 
-    /// Stop the player.
+    /// Stop the player and release the audio device.
     pub fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(sink) = self.sink.take() {
+            sink.stop();
         }
+        self.stream = None;
+        self.playing = false;
     }
 }
 
@@ -137,15 +150,4 @@ impl Drop for Music {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-fn which(bin: &str) -> Option<PathBuf> {
-    let var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&var) {
-        let cand = dir.join(bin);
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    None
 }

@@ -1,7 +1,7 @@
-//! FBR cracktro: composes the warp starfield, a big 3D "FBR" title, the
-//! dither-shaded 3D logo, the "DOWNLOADING RAM" loader, a straight scroller,
-//! and a freeze-and-blow-away ending — all in the 4-color FBR Game Boy palette.
-//! Foreground glyphs only: no background is ever painted.
+//! FBR cracktro: composes the warp starfield, a dither-shaded 3D logo, the
+//! "DOWNLOADING RAM" loader, a straight scroller, and a freeze-and-blow-away
+//! ending — all in the 4-color FBR Game Boy palette. Foreground glyphs only:
+//! no background is ever painted.
 
 use crate::canvas::{Canvas, Cell, Palette};
 use crate::hack::HackState;
@@ -44,17 +44,6 @@ fn dither_char(bright: f32, x: usize, y: usize) -> char {
 
 const BAR_WIDTH: usize = 44;
 
-/// Rows of blocky glyphs in the big title.
-pub const TITLE_ROWS: usize = 4;
-
-/// Big 4-row blocky font for the title. Each glyph is 4 wide.
-/// ('#' = ink, '.' = empty.) Add glyphs here to change the title text.
-const BIG_FONT: &[(&str, [&str; 4])] = &[
-    ("F", ["####", "#...", "###.", "#..."]),
-    ("B", ["###.", "#..#", "#..#", "###."]),
-    ("R", ["###.", "#..#", "###.", "#.."]),
-];
-
 /// Greetings / credits shown on the bottom scroller.
 ///
 /// EDIT THIS to add your own text. It scrolls left on a loop; separate
@@ -67,6 +56,7 @@ pub const GREETINGS: &str = "  MUSIC: \"ARCANE MAGIC\"  \u{2022}  GREETINGS TO: 
 /// available width and the available rows, so the model is always fully in
 /// view and never bleeds over the border or into the loader.
 pub const MODEL_BREAKPOINTS: &[(usize, usize)] = &[
+    (56, 28),
     (48, 24),
     (40, 20),
     (32, 16),
@@ -80,11 +70,11 @@ pub const MODEL_BREAKPOINTS: &[(usize, usize)] = &[
 ///
 /// Everything the renderer draws derives from this one struct, so the
 /// composition is guaranteed to fit: the model is centered in the region
-/// between the title and the loader, and every row/column is clamped inside
-/// the border.
+/// between the top border and the loader, and every row/column is clamped
+/// inside the border.
 #[derive(Debug, Clone, Copy)]
 pub struct Layout {
-    /// First row of the model's region (just below the title and its shadow).
+    /// First row of the model's region (just below the top border).
     pub region_top: usize,
     /// Last row of the model's region (just above the loader).
     pub region_bottom: usize,
@@ -97,15 +87,15 @@ pub struct Layout {
     pub bar_row: usize,
     pub status_row: usize,
     pub scroller_row: usize,
-    /// True when the frame is wide enough for the title + key hints.
+    /// True when the frame is wide enough for the top-border title + key hints.
     pub show_hint: bool,
     /// True when the terminal is too small for the full composition.
     pub too_small: bool,
 }
 
 /// Vertical placement of the logo inside its region, as a fraction of the
-/// leftover space (0.0 = flush under the title, 0.5 = dead centre, 1.0 = flush
-/// above the loader).
+/// leftover space (0.0 = flush under the top border, 0.5 = dead centre, 1.0 =
+/// flush above the loader).
 ///
 /// It sits deliberately below centre: the model's lit top face draws the eye
 /// upward and there is more empty space below it than above, so a geometric
@@ -113,8 +103,6 @@ pub struct Layout {
 /// down, lower it to move it up.
 const MODEL_V_BIAS: f32 = 0.60;
 
-/// Rows reserved below the title (title glyphs + drop shadow).
-const SHADOW_ROWS: usize = 2;
 /// Rows in the bottom loader block (label + bar + status).
 const LOADER_ROWS: usize = 3;
 /// Blank rows between the loader block and the scroller.
@@ -127,12 +115,11 @@ const BREATH_ROWS: usize = 1;
 ///
 /// ```text
 ///   borders      row 0, row h-1, col 0, col w-1
-///   title        rows 1 ..= 1 + TITLE_ROWS + SHADOW_ROWS
 ///   loader       rows h-5 ..= h-3   (label, bar, status)
 ///   breathing    row  h-2
 ///   scroller     row  h-1
 ///   region       rows region_top ..= region_bottom
-///                  region_top    = 1 + TITLE_ROWS + SHADOW_ROWS
+///                  region_top    = 1
 ///                  region_bottom = h - 1 - BREATH_ROWS - LOADER_ROWS
 ///   model        largest breakpoint (mw, mh) with
 ///                  mw <= w - 4   and   mh <= region_h
@@ -145,7 +132,7 @@ const BREATH_ROWS: usize = 1;
 /// `w - mw - (w - mw) / 2`, which differ by at most one cell.
 ///
 /// Vertically the model is biased below centre by `MODEL_V_BIAS` and clamped
-/// into the region, so it can never reach the title or the loader.
+/// into the region, so it can never reach the top border or the loader.
 ///
 /// Pure function of the size: unit-tested below and printable with `--layout`.
 pub fn layout(w: usize, h: usize) -> Layout {
@@ -158,8 +145,8 @@ pub fn layout(w: usize, h: usize) -> Layout {
     let bar_row = label_row + 1;
     let status_row = label_row + 2;
 
-    // --- model region, between the title and the loader -------------------
-    let region_top = (1 + TITLE_ROWS + SHADOW_ROWS).min(h.saturating_sub(2)).max(1);
+    // --- model region, between the top border and the loader --------------
+    let region_top = 1usize.min(h.saturating_sub(2)).max(1);
     let region_bottom = label_row.saturating_sub(1).max(region_top);
     let region_h = region_bottom - region_top + 1;
 
@@ -334,7 +321,6 @@ pub fn describe_layout(w: usize, h: usize) -> String {
     format!(
         "terminal {w}x{h}\n\
          model {}x{} at col {} row {} (rows {}..{})\n\
-         title row 1..{}\n\
          label {}  bar {}  status {}  scroller {}\n\
          hint {}  too_small {}\n",
         l.model_w,
@@ -343,7 +329,6 @@ pub fn describe_layout(w: usize, h: usize) -> String {
         l.model_y,
         l.region_top,
         l.region_bottom,
-        TITLE_ROWS,
         l.label_row,
         l.bar_row,
         l.status_row,
@@ -381,7 +366,7 @@ impl Celebration {
         Self::STAGGER + fall + 0.2
     }
 
-    fn render(&mut self, dt: f32, p: Palette, w: usize, h: usize) -> String {
+    fn render(&mut self, dt: f32, p: Palette, w: usize, h: usize) -> Canvas {
         self.t += dt;
         let t = self.t;
         let mut cv = Canvas::new(w, h, p.colors[3]);
@@ -414,7 +399,7 @@ impl Celebration {
             let col = p.cycle_shade(1.0, t, 0.0);
             cv.text_center_inner(h / 2, "RAM UNLOCKED \u{2022} DONE", col, true);
         }
-        cv.to_ansi()
+        cv
     }
 }
 
@@ -439,8 +424,9 @@ impl Cracktro {
         self.starfield.set_size(w, h);
     }
 
-    /// Render one frame. `logo` is the 3D model's pixel frame; `state` the
-    /// hack state.
+    /// Render one frame into a [`Canvas`]. `logo` is the 3D model's pixel
+    /// frame; `state` the hack state. The caller writes the canvas into the
+    /// ratatui buffer (see `Canvas::to_buffer`).
     pub fn render(
         &mut self,
         dt: f32,
@@ -448,7 +434,7 @@ impl Cracktro {
         state: &HackState,
         w: usize,
         h: usize,
-    ) -> String {
+    ) -> Canvas {
         self.time += dt;
         let t = self.time;
         let p = self.palette;
@@ -463,7 +449,7 @@ impl Cracktro {
 
         // Guard: need at least a 3x3 box.
         if w < 3 || h < 3 {
-            return cv.to_ansi();
+            return cv;
         }
 
         // 1. Warp starfield background, clipped to the inner area so it never
@@ -497,6 +483,17 @@ impl Cracktro {
             cv.set(start + i, 0, c, ccol, true);
         }
 
+        // 2a. Live terminal size, top-left of the border. It updates on every
+        //     resize so you can watch the frame reflow. Only drawn when it
+        //     stays clear of the centered title.
+        let size_s = format!("{}x{}", w, h);
+        let sw = size_s.chars().count();
+        if 2 + sw + 2 < start {
+            for (i, c) in size_s.chars().enumerate() {
+                cv.set(2 + i, 0, c, p.colors[0], true);
+            }
+        }
+
         // 2c. Key hints, right-aligned in the top border. Only drawn when
         //     the frame is wide enough to keep them clear of the title.
         let lay = layout(w, h);
@@ -509,11 +506,9 @@ impl Cracktro {
             }
         }
 
-        // 3. Big 3D "FBR" title, anchored under the top border.
-        self.big_title(&mut cv, "FBR", 1, t);
-
-        // 4. 3D logo — centered in the region between the title and the loader
-        //    (see `layout`, which guarantees it fits and never bleeds). Each
+        // 3. 3D logo — centered in the region between the top border and the
+        //    loader (see `layout`, which guarantees it fits and never bleeds).
+        //    Each
         //    sample is a shaded block: the density ramp picks the glyph (dark
         //    faces `░`, bright faces `█`) so the silhouette is always solid,
         //    and the color is the palette's mid shade, brightening to the
@@ -568,7 +563,7 @@ impl Cracktro {
             return self.celebration.as_mut().unwrap().render(0.0, p, w, h);
         }
 
-        cv.to_ansi()
+        cv
     }
 
     /// Draw the full closed box: top/bottom borders (with the title / marquee
@@ -591,56 +586,6 @@ impl Cracktro {
         for y in 1..h - 1 {
             cv.set(0, y, '│', col, false);
             cv.set(w - 1, y, '│', col, false);
-        }
-    }
-
-    fn big_title(&self, cv: &mut Canvas, text: &str, top: usize, t: f32) {
-        let p = self.palette;
-        // Lay out the glyph grid first (TITLE_ROWS rows tall, 4-wide glyphs).
-        let gw = 4 * text.chars().count() + (text.chars().count() - 1);
-        let mut grid: Vec<Vec<char>> = vec![vec![' '; gw]; TITLE_ROWS];
-        for (li, ch) in text.chars().enumerate() {
-            if let Some((_, g)) = BIG_FONT.iter().find(|(n, _)| *n == ch.to_string()) {
-                for r in 0..TITLE_ROWS {
-                    for c in 0..4 {
-                        let col = li * 5 + c;
-                        if col < gw {
-                            grid[r][col] = g[r].chars().nth(c).unwrap_or(' ');
-                        }
-                    }
-                }
-            }
-        }
-        let start = cv.inner_center(gw);
-        // Drop shadow: the glyph shape shifted down-right, skipping any cell
-        // the face itself covers (so counters and gaps stay open). Mid shade,
-        // so the extrusion is actually visible against the dark background.
-        for (dx, dy) in [(1usize, 1usize), (2, 2)] {
-            for r in 0..TITLE_ROWS {
-                for c in 0..gw {
-                    if grid[r][c] != '#' {
-                        continue;
-                    }
-                    let (sr, sc) = (top + r + dy, start + c + dx);
-                    let on_face = sr >= top
-                        && sr < top + TITLE_ROWS
-                        && sc >= start
-                        && sc < start + gw
-                        && grid[sr - top][sc - start] == '#';
-                    if !on_face {
-                        cv.set(sc, sr, '#', p.colors[2], false);
-                    }
-                }
-            }
-        }
-        // Shimmering face on top.
-        for r in 0..TITLE_ROWS {
-            for c in 0..gw {
-                if grid[r][c] == '#' {
-                    let col = p.cycle_shade(1.0, t, c as f32 * 0.04);
-                    cv.set(start + c, top + r, '#', col, true);
-                }
-            }
         }
     }
 

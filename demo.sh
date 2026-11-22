@@ -27,15 +27,5 @@ if [[ "$needs_build" == 1 ]]; then
   fi
 fi
 
-# If no audio player is installed (NixOS), run inside a nix-shell that has
-# mpv, so the cracktro's music can play.
-if ! command -v mpv >/dev/null 2>&1 \
-   && ! command -v ffplay >/dev/null 2>&1 \
-   && ! command -v paplay >/dev/null 2>&1 \
-   && ! command -v aplay >/dev/null 2>&1 \
-   && command -v nix-shell >/dev/null 2>&1; then
-  ARGS=$(printf ' %q' "$@")
-  exec nix-shell -p mpv --run "'"$BIN"'$ARGS"
-fi
-
+# Music is embedded (rodio), so no external audio player is needed.
 exec "$BIN" "$@"

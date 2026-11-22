@@ -6,6 +6,9 @@ description = "FBR RAM downloader TUI with a 3D spinning logo"
 
 [dependencies]
 crossterm = "0.28"
+ratatui = "0.29"
+rodio = "0.21"
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

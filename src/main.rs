@@ -24,6 +24,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,9 @@ struct Args {
     /// `--layout [W H]`: print the computed layout and exit (debug aid).
     layout: bool,
     layout_size: Option<(usize, usize)>,
+    /// `--dark` / `--light`: force the terminal theme instead of auto-detecting.
+    /// `Some(true)` = dark, `Some(false)` = light, `None` = auto-detect.
+    theme: Option<bool>,
 }
 
 fn parse_args() -> Args {
@@ -48,6 +52,7 @@ fn parse_args() -> Args {
         no_music: false,
         layout: false,
         layout_size: None,
+        theme: None,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -72,6 +77,14 @@ fn parse_args() -> Args {
             }
             "--grey" => {
                 args.grey = true;
+                i += 1;
+            }
+            "--dark" => {
+                args.theme = Some(true);
+                i += 1;
+            }
+            "--light" => {
+                args.theme = Some(false);
                 i += 1;
             }
             "--no-music" => {
@@ -118,6 +131,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return dump_frames(n, w, h, palette);
     }
 
+    // Detect the terminal's light/dark theme and remap the one palette shade
+    // that would be invisible against the background. `--dark`/`--light`
+    // override the auto-detection.
+    let dark = match args.theme {
+        Some(d) => d,
+        None => detect_dark_mode(),
+    };
+    let palette = palette.remap_for(dark);
+
     let term = crossterm::terminal::size()?;
     let (term_w, term_h) = (term.0 as usize, term.1 as usize);
 
@@ -147,19 +169,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
     )?;
 
+    // Ratatui owns the back-buffer and diffs it against the previous frame,
+    // writing only the cells that changed. It auto-resizes its buffers to the
+    // real terminal size on every draw, so resizes are handled for free.
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+
     let result = run_loop(
         &mut scene,
         &mut cracktro,
         &mut hack,
         &mut music,
-        &mut stdout,
+        &mut terminal,
         &mut (term_w, term_h),
     );
 
     // Always restore the terminal and stop music, even on error.
     disable_raw_mode()?;
     execute!(
-        stdout,
+        io::stdout(),
         crossterm::event::DisableMouseCapture,
         LeaveAlternateScreen,
         crossterm::cursor::Show
@@ -180,8 +207,8 @@ fn dump_frames(n: usize, w: usize, h: usize, palette: canvas::Palette) -> Result
     for i in 0..n {
         scene.advance(dt);
         let state = hack.poll();
-        let frame = cracktro.render(dt, &scene.render(), &state, w, h);
-        println!("{}", frame);
+        let cv = cracktro.render(dt, &scene.render(), &state, w, h);
+        println!("{}", cv.to_ansi());
         if i + 1 < n {
             println!();
         }
@@ -196,12 +223,129 @@ fn scene_size(term_w: usize, term_h: usize) -> (usize, usize) {
     tui::logo_cells(term_w, term_h)
 }
 
+/// Detect whether the terminal has a dark background, so the palette can avoid
+/// the one shade that would be invisible against it.
+///
+/// Asks the terminal for its background color via the OSC 11 query
+/// (`ESC ] 11 ; ? BEL`) and reads the response from the input stream. Most
+/// modern terminals (kitty, WezTerm, iTerm2, Ghostty, foot, xterm, VTE) answer
+/// with an `rgb:RR/GG/BB` string. If the terminal doesn't respond within the
+/// timeout, we fall back to assuming a dark background (the common case, and
+/// the safe default for this cracktro's palette).
+fn detect_dark_mode() -> bool {
+    use std::io::IsTerminal;
+
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    // Only query if we have a real TTY on both ends; otherwise the response
+    // would never come and we'd just wait for the timeout.
+    if !stdin.is_terminal() || !stdout.is_terminal() {
+        return true;
+    }
+
+    // The query needs raw input to read the response without a newline.
+    // Remember whether raw mode was already on so we can restore it.
+    let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+    if !was_raw {
+        if let Err(_) = crossterm::terminal::enable_raw_mode() {
+            return true;
+        }
+    }
+    let result = query_background();
+    if !was_raw {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+    result
+}
+
+/// Send the OSC 11 background-color query and parse the response.
+///
+/// Uses a non-blocking read with a hard deadline so a terminal that never
+/// answers (or answers slowly) can't hang startup.
+fn query_background() -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::io::AsRawFd;
+    use std::time::{Duration, Instant};
+
+    let mut stdout = io::stdout();
+    let _ = stdout.write_all(b"\x1b]11;?\x07");
+    let _ = stdout.flush();
+
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+    // Make stdin non-blocking for the duration of the query.
+    let orig = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFL, orig | libc::O_NONBLOCK);
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(150);
+    let mut buf = [0u8; 256];
+    let mut got = 0usize;
+    loop {
+        if let Some(rgb) = parse_osc11(&buf[..got]) {
+            // Restore blocking mode before returning.
+            unsafe { libc::fcntl(fd, libc::F_SETFL, orig); }
+            return is_dark_rgb(rgb);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        // Wait up to 10ms for data, so we don't busy-spin.
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let n = unsafe { libc::poll(&mut pollfd, 1, 10) };
+        if n > 0 && (pollfd.revents & libc::POLLIN) != 0 {
+            let mut handle = stdin.lock();
+            match handle.read(&mut buf[got..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    got += n;
+                    if got >= buf.len() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => break,
+            }
+        }
+    }
+    // Restore blocking mode.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, orig); }
+    // No response: assume dark.
+    true
+}
+
+/// Parse an `rgb:RR/GG/BB` (hex) payload out of an OSC 11 response.
+fn parse_osc11(data: &[u8]) -> Option<(u8, u8, u8)> {
+    let s = String::from_utf8_lossy(data);
+    let start = s.find("rgb:")? + 4;
+    let rest = &s[start..];
+    let parts: Vec<&str> = rest.splitn(3, '/').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let r = u8::from_str_radix(parts[0].trim(), 16).ok()?;
+    let g = u8::from_str_radix(parts[1].trim(), 16).ok()?;
+    let b = u8::from_str_radix(parts[2].trim(), 16).ok()?;
+    Some((r, g, b))
+}
+
+/// Perceptual luminance (Rec. 709). A background darker than ~0.5 is "dark".
+fn is_dark_rgb((r, g, b): (u8, u8, u8)) -> bool {
+    let lum = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
+    lum < 128.0
+}
+
 fn run_loop(
     scene: &mut scene::Scene,
     cracktro: &mut tui::Cracktro,
     hack: &mut Box<dyn hack::Hack>,
     music: &mut music::Music,
-    stdout: &mut io::Stdout,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     size: &mut (usize, usize),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut last = Instant::now();
@@ -215,8 +359,9 @@ fn run_loop(
         // Trust the terminal's real size every frame. Some terminals and
         // multiplexers do not deliver resize events reliably, and a stale size
         // would leave the composition mis-framed. `terminal::size` is a cheap
-        // ioctl, so polling it here keeps the layout always correct.
-        let mut resized = false;
+        // ioctl, so polling it here keeps the scene/cracktro rasterization in
+        // sync with the real terminal. Ratatui's `draw` independently
+        // auto-resizes its own back-buffer to the same size.
         if let Ok((tw, th)) = crossterm::terminal::size() {
             let (tw, th) = (tw as usize, th as usize);
             if (tw, th) != *size && tw > 0 && th > 0 {
@@ -224,7 +369,6 @@ fn run_loop(
                 let (sw, sh) = scene_size(tw, th);
                 scene.set_size(sw, sh);
                 cracktro.set_size(tw, th);
-                resized = true;
             }
         }
 
@@ -243,7 +387,6 @@ fn run_loop(
                     let (sw, sh) = scene_size(w as usize, h as usize);
                     scene.set_size(sw, sh);
                     cracktro.set_size(w as usize, h as usize);
-                    resized = true;
                 }
                 Event::Mouse(m) => match m.kind {
                     MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
@@ -276,35 +419,21 @@ fn run_loop(
         scene.advance(dt);
         let state = hack.poll();
         if state.error.is_some() {
-            let frame = cracktro.render(dt, &scene.render(), &state, size.0, size.1);
-            execute!(
-                stdout,
-                crossterm::cursor::MoveTo(0, 0),
-                crossterm::style::Print(frame)
-            )?;
+            let cv = cracktro.render(dt, &scene.render(), &state, size.0, size.1);
+            let _ = terminal.draw(|f| cv.to_buffer(f.buffer_mut()));
             return Err(state.error.unwrap().into());
         }
         if state.done && finished_at.is_none() {
             finished_at = Some(Instant::now());
         }
 
-        let frame = cracktro.render(dt, &scene.render(), &state, size.0, size.1);
-        if resized {
-            // btop-style: clear the reflowed content and redraw in the SAME
-            // write batch, so there's no blank flash between them.
-            execute!(
-                stdout,
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                crossterm::cursor::MoveTo(0, 0),
-                crossterm::style::Print(frame)
-            )?;
-        } else {
-            execute!(
-                stdout,
-                crossterm::cursor::MoveTo(0, 0),
-                crossterm::style::Print(frame)
-            )?;
-        }
+        // Render the frame into a canvas, then hand it to ratatui. `draw`
+        // auto-resizes the back-buffer to the real terminal size, diffs it
+        // against the previous frame, and writes only the changed cells — so
+        // resizes reflow cleanly with no blank flash and no full-screen
+        // reprint.
+        let cv = cracktro.render(dt, &scene.render(), &state, size.0, size.1);
+        terminal.draw(|f| cv.to_buffer(f.buffer_mut()))?;
 
         if let Some(t0) = finished_at {
             // Keep animating (the freeze + blow-away celebration) for the
