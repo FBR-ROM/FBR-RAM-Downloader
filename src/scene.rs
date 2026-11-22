@@ -468,7 +468,6 @@ impl Starfield {
         let mut frame = Frame::new(self.w, self.h);
         let cx = self.w as f32 / 2.0;
         let cy = self.h as f32 / 2.0;
-        let aspect = (self.w as f32 / self.h.max(1) as f32).max(0.1);
         for s in &mut self.stars {
             s[2] -= dt * speed;
             if s[2] <= 0.05 {
@@ -476,7 +475,12 @@ impl Starfield {
                 s[1] = (s[1] * 2.0 - 1.0).clamp(-1.0, 1.0);
                 s[2] = 0.9 + (s[0] * s[0] + s[1] * s[1]) * 0.1;
             }
-            let px = s[0] / s[2] * aspect * cx * 0.9;
+            // Symmetric warp: the same focal length (0.9 x half the dimension)
+            // on both axes, so the field of view is square and stars radiate
+            // evenly from the center. (An extra aspect multiplier on x used to
+            // over-compress the horizontal cone by aspect^2, so most stars
+            // flew off the sides before they were ever on-screen.)
+            let px = s[0] / s[2] * cx * 0.9;
             let py = s[1] / s[2] * cy * 0.9;
             let x = (cx + px).round() as i32;
             let y = (cy + py).round() as i32;
