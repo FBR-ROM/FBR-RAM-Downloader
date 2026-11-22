@@ -8,7 +8,9 @@
 //!
 //! Flags:
 //!   --dump N [W H]   headless: print N frames to stdout
+//!   --layout [W H]   print the computed layout for a size and exit
 //!   --grey           use the Grey Quarttrochrome palette (default: Green)
+//!   --dark/--light   force the terminal theme (default: auto-detect)
 //!   --music FILE     play a specific track (else auto-detect music/)
 //!   --no-music       disable music
 
@@ -131,19 +133,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return dump_frames(n, w, h, palette);
     }
 
-    // Detect the terminal's light/dark theme and remap the one palette shade
-    // that would be invisible against the background. `--dark`/`--light`
-    // override the auto-detection.
-    let dark = match args.theme {
-        Some(d) => d,
-        None => detect_dark_mode(),
+    // Detect the terminal's background color and remap any palette shade that
+    // would be invisible against it. `--dark`/`--light` override the
+    // auto-detection by assuming a black or white background.
+    let bg: Option<(u8, u8, u8)> = match args.theme {
+        Some(true) => Some((0, 0, 0)),
+        Some(false) => Some((255, 255, 255)),
+        None => detect_background(),
     };
-    let palette = palette.remap_for(dark);
+    let palette = palette.remap_for(bg);
 
     let term = crossterm::terminal::size()?;
     let (term_w, term_h) = (term.0 as usize, term.1 as usize);
 
-    let mut scene = scene::Scene::new(scene_size(term_w, term_h).0, scene_size(term_w, term_h).1);
+    let (sw, sh) = scene_size(term_w, term_h);
+    let mut scene = scene::Scene::new(sw, sh);
     let mut cracktro = tui::Cracktro::new(term_w, term_h, palette);
     let mut hack: Box<dyn hack::Hack> = Box::new(hack::StubHack::new());
     hack.start()?;
@@ -183,14 +187,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut (term_w, term_h),
     );
 
-    // Always restore the terminal and stop music, even on error.
-    disable_raw_mode()?;
-    execute!(
+    // Always restore the terminal and stop music, even on error. Teardown is
+    // best-effort: a failure here must not mask the real result or skip the
+    // music/hack cleanup.
+    let _ = disable_raw_mode();
+    let _ = execute!(
         io::stdout(),
         crossterm::event::DisableMouseCapture,
         LeaveAlternateScreen,
         crossterm::cursor::Show
-    )?;
+    );
     music.stop();
     let _ = hack.finish();
 
@@ -223,16 +229,16 @@ fn scene_size(term_w: usize, term_h: usize) -> (usize, usize) {
     tui::logo_cells(term_w, term_h)
 }
 
-/// Detect whether the terminal has a dark background, so the palette can avoid
-/// the one shade that would be invisible against it.
+/// Detect the terminal's background color, so the palette can avoid any shade
+/// that would be invisible against it.
 ///
 /// Asks the terminal for its background color via the OSC 11 query
 /// (`ESC ] 11 ; ? BEL`) and reads the response from the input stream. Most
 /// modern terminals (kitty, WezTerm, iTerm2, Ghostty, foot, xterm, VTE) answer
 /// with an `rgb:RR/GG/BB` string. If the terminal doesn't respond within the
-/// timeout, we fall back to assuming a dark background (the common case, and
-/// the safe default for this cracktro's palette).
-fn detect_dark_mode() -> bool {
+/// timeout, we return `None` and the palette falls back to a set of shades
+/// that is visible on both a black and a white background.
+fn detect_background() -> Option<(u8, u8, u8)> {
     use std::io::IsTerminal;
 
     let stdin = io::stdin();
@@ -240,7 +246,7 @@ fn detect_dark_mode() -> bool {
     // Only query if we have a real TTY on both ends; otherwise the response
     // would never come and we'd just wait for the timeout.
     if !stdin.is_terminal() || !stdout.is_terminal() {
-        return true;
+        return None;
     }
 
     // The query needs raw input to read the response without a newline.
@@ -248,7 +254,7 @@ fn detect_dark_mode() -> bool {
     let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
     if !was_raw {
         if let Err(_) = crossterm::terminal::enable_raw_mode() {
-            return true;
+            return None;
         }
     }
     let result = query_background();
@@ -262,7 +268,7 @@ fn detect_dark_mode() -> bool {
 ///
 /// Uses a non-blocking read with a hard deadline so a terminal that never
 /// answers (or answers slowly) can't hang startup.
-fn query_background() -> bool {
+fn query_background() -> Option<(u8, u8, u8)> {
     use std::io::{Read, Write};
     use std::os::unix::io::AsRawFd;
     use std::time::{Duration, Instant};
@@ -273,23 +279,23 @@ fn query_background() -> bool {
 
     let stdin = io::stdin();
     let fd = stdin.as_raw_fd();
-    // Make stdin non-blocking for the duration of the query.
+    // Make stdin non-blocking for the duration of the query, then restore the
+    // original flags on every exit path.
     let orig = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    unsafe {
-        libc::fcntl(fd, libc::F_SETFL, orig | libc::O_NONBLOCK);
+    if orig < 0 {
+        return None; // can't query the flags; remap will be theme-safe
     }
+    unsafe { libc::fcntl(fd, libc::F_SETFL, orig | libc::O_NONBLOCK) };
 
     let deadline = Instant::now() + Duration::from_millis(150);
     let mut buf = [0u8; 256];
     let mut got = 0usize;
-    loop {
+    let bg = loop {
         if let Some(rgb) = parse_osc11(&buf[..got]) {
-            // Restore blocking mode before returning.
-            unsafe { libc::fcntl(fd, libc::F_SETFL, orig); }
-            return is_dark_rgb(rgb);
+            break Some(rgb);
         }
         if Instant::now() >= deadline {
-            break;
+            break None; // no response: remap will be theme-safe
         }
         // Wait up to 10ms for data, so we don't busy-spin.
         let mut pollfd = libc::pollfd {
@@ -301,25 +307,27 @@ fn query_background() -> bool {
         if n > 0 && (pollfd.revents & libc::POLLIN) != 0 {
             let mut handle = stdin.lock();
             match handle.read(&mut buf[got..]) {
-                Ok(0) => break,
+                Ok(0) => break None,
                 Ok(n) => {
                     got += n;
                     if got >= buf.len() {
-                        break;
+                        break None;
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => break,
+                Err(_) => break None,
             }
         }
-    }
-    // Restore blocking mode.
-    unsafe { libc::fcntl(fd, libc::F_SETFL, orig); }
-    // No response: assume dark.
-    true
+    };
+    // Restore the original flags.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, orig) };
+    bg
 }
 
-/// Parse an `rgb:RR/GG/BB` (hex) payload out of an OSC 11 response.
+/// Parse an `rgb:RR/GG/BB` payload out of an OSC 11 response.
+///
+/// Terminals report either 8-bit (`rgb:ff/80/00`) or 16-bit
+/// (`rgb:ffff/8080/0000`) hex; both are scaled to 8-bit.
 fn parse_osc11(data: &[u8]) -> Option<(u8, u8, u8)> {
     let s = String::from_utf8_lossy(data);
     let start = s.find("rgb:")? + 4;
@@ -328,16 +336,16 @@ fn parse_osc11(data: &[u8]) -> Option<(u8, u8, u8)> {
     if parts.len() < 3 {
         return None;
     }
-    let r = u8::from_str_radix(parts[0].trim(), 16).ok()?;
-    let g = u8::from_str_radix(parts[1].trim(), 16).ok()?;
-    let b = u8::from_str_radix(parts[2].trim(), 16).ok()?;
-    Some((r, g, b))
-}
-
-/// Perceptual luminance (Rec. 709). A background darker than ~0.5 is "dark".
-fn is_dark_rgb((r, g, b): (u8, u8, u8)) -> bool {
-    let lum = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
-    lum < 128.0
+    let to8 = |p: &str| -> Option<u8> {
+        let p = p.trim();
+        let v = u32::from_str_radix(p, 16).ok()?;
+        match p.len() {
+            1..=2 => Some(v as u8), // 8-bit
+            3..=4 => Some(((v * 255) / 0xffff) as u8), // 16-bit
+            _ => None,
+        }
+    };
+    Some((to8(parts[0])?, to8(parts[1])?, to8(parts[2])?))
 }
 
 fn run_loop(
@@ -382,12 +390,8 @@ fn run_loop(
                 Event::Key(k) if k.code == KeyCode::Char('m') => {
                     music.toggle();
                 }
-                Event::Resize(w, h) => {
-                    *size = (w as usize, h as usize);
-                    let (sw, sh) = scene_size(w as usize, h as usize);
-                    scene.set_size(sw, sh);
-                    cracktro.set_size(w as usize, h as usize);
-                }
+                // Resize is handled by the per-frame size poll above; the
+                // event is ignored here.
                 Event::Mouse(m) => match m.kind {
                     MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                         scene.mouse_down();

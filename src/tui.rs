@@ -5,7 +5,7 @@
 
 use crate::canvas::{Canvas, Cell, Palette};
 use crate::hack::HackState;
-use crate::scene::{ModelFrame, Starfield};
+use crate::scene::{ModelFrame, Starfield, WARP_SPEED};
 
 /// Density ramp for the model: lightest coverage first. Every covered sample
 /// gets at least `░`, so the model's silhouette is always solid (no gaps, no
@@ -146,26 +146,27 @@ pub fn layout(w: usize, h: usize) -> Layout {
     let status_row = label_row + 2;
 
     // --- model region, between the top border and the loader --------------
-    let region_top = 1usize.min(h.saturating_sub(2)).max(1);
+    // (h >= 3 here, so the region always has at least one row.)
+    let region_top = 1;
     let region_bottom = label_row.saturating_sub(1).max(region_top);
     let region_h = region_bottom - region_top + 1;
 
-    // --- largest breakpoint that fits both ways ---------------------------
-    // Horizontal budget: the inner width minus one cell of margin each side,
-    // so a centered model can never touch the side borders (mw <= w - 4).
-    let avail_w = w.saturating_sub(4);
-    let mut model_w = 0usize;
+    // --- model frame: full inner width, height from the largest breakpoint
+    //     that fits the region. The v100/P5000 are scaled up to match the FBR
+    //     logo's height, which makes them wider; spanning the full inner width
+    //     (cols 1..w-2) lets them extend to the edges without clipping. The
+    //     scene's scale is set by the height (the tighter axis), so the model's
+    //     height is unchanged — only the horizontal room grows.
     let mut model_h = 0usize;
-    for &(bw, bh) in MODEL_BREAKPOINTS {
-        if bw <= avail_w && bh <= region_h {
-            model_w = bw;
+    for &(_, bh) in MODEL_BREAKPOINTS {
+        if bh <= region_h {
             model_h = bh;
             break;
         }
     }
-
-    // --- placement: exact horizontal centering, biased vertically ----------//
-    let model_x = (w - model_w) / 2;
+    // No breakpoint fits the region height: no model.
+    let model_w = if model_h == 0 { 0 } else { w.saturating_sub(2) };
+    let model_x = 1;
     let leftover = region_h.saturating_sub(model_h) as f32;
     let offset = (leftover * MODEL_V_BIAS).round() as usize;
     let lowest_y = region_bottom + 1 - model_h; // keeps the model above the loader
@@ -369,7 +370,7 @@ impl Celebration {
     fn render(&mut self, dt: f32, p: Palette, w: usize, h: usize) -> Canvas {
         self.t += dt;
         let t = self.t;
-        let mut cv = Canvas::new(w, h, p.colors[3]);
+        let mut cv = Canvas::new(w, h);
         // Center the frozen screen (handles a resize mid-celebration).
         let ox = w.saturating_sub(self.sw) / 2;
         let oy = h.saturating_sub(self.sh) / 2;
@@ -427,6 +428,9 @@ impl Cracktro {
     /// Render one frame into a [`Canvas`]. `logo` is the 3D model's pixel
     /// frame; `state` the hack state. The caller writes the canvas into the
     /// ratatui buffer (see `Canvas::to_buffer`).
+    ///
+    /// Drawing order matters: later writes win, so the starfield goes first
+    /// and everything else covers it.
     pub fn render(
         &mut self,
         dt: f32,
@@ -445,16 +449,47 @@ impl Cracktro {
             return celeb.render(dt, p, w, h);
         }
 
-        let mut cv = Canvas::new(w, h, p.colors[3]);
+        let mut cv = Canvas::new(w, h);
 
         // Guard: need at least a 3x3 box.
         if w < 3 || h < 3 {
             return cv;
         }
 
-        // 1. Warp starfield background, clipped to the inner area so it never
-        //    touches the border. The brightest stars pop in the lightest shade.
-        let sf = self.starfield.render(dt, 0.55);
+        let lay = layout(w, h);
+
+        // 1. Warp starfield, clipped to the inner area so it never touches
+        //    the border.
+        self.starfield_layer(&mut cv, dt, w, h);
+
+        // 2. Closed box frame, with the title, size readout and key hints
+        //    drawn over the top border.
+        self.box_frame(&mut cv, w, h);
+        self.border_text(&mut cv, &lay, w, h, t);
+
+        // 3. 3D logo, dithered blocks, centered in its region.
+        self.logo(&mut cv, &lay, logo);
+
+        // 4. Loader: label, bar, status.
+        self.loader(&mut cv, &lay, state, t, w);
+
+        // 5. Bottom border marquee.
+        self.marquee(&mut cv, w, h, t);
+
+        // 6. On completion: freeze this complete frame, then blow it away.
+        if state.done {
+            self.celebration = Some(Celebration::snapshot(&cv));
+            return self.celebration.as_mut().unwrap().render(0.0, p, w, h);
+        }
+
+        cv
+    }
+
+    /// The warp starfield background. The brightest stars pop in the
+    /// lightest shade; the rest are quantized to the mid shades.
+    fn starfield_layer(&mut self, cv: &mut Canvas, dt: f32, w: usize, h: usize) {
+        let p = self.palette;
+        let sf = self.starfield.render(dt, WARP_SPEED);
         for y in 1..h - 1 {
             for x in 1..w - 1 {
                 if y < sf.h && x < sf.w {
@@ -470,11 +505,15 @@ impl Cracktro {
                 }
             }
         }
+    }
 
-        // 2. Closed box frame: top, bottom, and both side borders.
-        self.box_frame(&mut cv, w, h, t);
+    /// The top-border text: the shimmering title centered, the live terminal
+    /// size top-left, and the key hints right-aligned — each drawn only when
+    /// it stays clear of the others.
+    fn border_text(&self, cv: &mut Canvas, lay: &Layout, w: usize, h: usize, t: f32) {
+        let p = self.palette;
 
-        // 2b. "CRACKED BY FBR ROM" title in the top border (shimmering).
+        // Title, centered, color-cycled per character.
         let title = "CRACKED BY FBR ROM";
         let tw = title.chars().count();
         let start = cv.inner_center(tw);
@@ -483,9 +522,8 @@ impl Cracktro {
             cv.set(start + i, 0, c, ccol, true);
         }
 
-        // 2a. Live terminal size, top-left of the border. It updates on every
-        //     resize so you can watch the frame reflow. Only drawn when it
-        //     stays clear of the centered title.
+        // Live terminal size, top-left: it updates on every resize so you can
+        // watch the frame reflow.
         let size_s = format!("{}x{}", w, h);
         let sw = size_s.chars().count();
         if 2 + sw + 2 < start {
@@ -494,9 +532,7 @@ impl Cracktro {
             }
         }
 
-        // 2c. Key hints, right-aligned in the top border. Only drawn when
-        //     the frame is wide enough to keep them clear of the title.
-        let lay = layout(w, h);
+        // Key hints, right-aligned, only when they stay clear of the title.
         let hint = "M MUTE \u{2022} Q QUIT";
         let hw = hint.chars().count();
         let hint_start = w.saturating_sub(2).saturating_sub(hw);
@@ -505,44 +541,40 @@ impl Cracktro {
                 cv.set(hint_start + i, 0, c, p.colors[2], false);
             }
         }
+    }
 
-        // 3. 3D logo — centered in the region between the top border and the
-        //    loader (see `layout`, which guarantees it fits and never bleeds).
-        //    Each
-        //    sample is a shaded block: the density ramp picks the glyph (dark
-        //    faces `░`, bright faces `█`) so the silhouette is always solid,
-        //    and the color is the palette's mid shade, brightening to the
-        //    lightest for a highlight. Foreground only, so it works on any
-        //    terminal. Uncovered samples stay blank so the starfield shows
-        //    around the model.
+    /// The 3D logo: each brightness sample becomes a dithered block (dark
+    /// faces `░`, bright faces `█`) so the silhouette is always solid and the
+    /// character density carries the shading. Color is the mid shade,
+    /// brightening to the lightest for highlights. Uncovered samples stay
+    /// blank so the starfield shows around the model.
+    fn logo(&self, cv: &mut Canvas, lay: &Layout, logo: &ModelFrame) {
+        let p = self.palette;
         for cy in 0..lay.model_h {
-            let row = lay.model_y + cy;
-            if row >= h {
-                break;
-            }
             for cx in 0..lay.model_w {
-                let idx = cy * logo.w + cx;
-                if idx >= logo.pix.len() {
-                    continue;
-                }
-                let bright = logo.pix[idx];
+                let bright = logo.pix[cy * logo.w + cx];
                 if bright < 0.04 {
                     continue;
                 }
                 let col = if bright > 0.85 { p.colors[0] } else { p.colors[1] };
                 let ch = dither_char(bright, cx, cy);
-                cv.set(lay.model_x + cx, row, ch, col, bright > 0.7);
+                cv.set(lay.model_x + cx, lay.model_y + cy, ch, col, bright > 0.7);
             }
         }
+    }
 
-        // 5. Loader label + bar + status.
-        let label_col = p.colors[2];
-        cv.text_center_inner(lay.label_row, "DOWNLOADING RAM", label_col, true);
-        self.bar(&mut cv, lay.bar_row, state, t);
-        // Small terminals: prompt to resize instead of the status line.
-        // Pick a message that actually fits the inner width.
+    /// The loader block: label, bar, and a status line that shows the hack's
+    /// message — or a prompt to resize on small terminals, or the completion
+    /// message.
+    fn loader(&self, cv: &mut Canvas, lay: &Layout, state: &HackState, t: f32, w: usize) {
+        let p = self.palette;
+        cv.text_center_inner(lay.label_row, "DOWNLOADING RAM", p.colors[2], true);
+        self.bar(cv, lay.bar_row, state, t);
+
         let inner_w = w.saturating_sub(2);
-        let (status, status_col, status_bold) = if state.done {
+        let (status, status_col, status_bold) = if let Some(err) = &state.error {
+            (err.as_str(), p.colors[0], true)
+        } else if state.done {
             ("RAM UNLOCKED \u{2022} DONE", p.cycle_shade(1.0, t, 0.0), true)
         } else if lay.too_small {
             let msg = if inner_w >= 20 { "RESIZE FOR BEST FIT" } else { "RESIZE" };
@@ -550,25 +582,12 @@ impl Cracktro {
         } else {
             (state.status.as_str(), p.colors[0], false)
         };
-        if lay.status_row < h - 1 {
-            cv.text_center_inner(lay.status_row, status, status_col, status_bold);
-        }
-
-        // 7. Bottom border marquee (straight, single color).
-        self.marquee(&mut cv, w, h, t);
-
-        // 8. On completion: freeze this complete frame, then blow it away.
-        if state.done {
-            self.celebration = Some(Celebration::snapshot(&cv));
-            return self.celebration.as_mut().unwrap().render(0.0, p, w, h);
-        }
-
-        cv
+        cv.text_center_inner(lay.status_row, status, status_col, status_bold);
     }
 
     /// Draw the full closed box: top/bottom borders (with the title / marquee
     /// drawn over them by their own functions) and the left/right `│` sides.
-    fn box_frame(&self, cv: &mut Canvas, w: usize, h: usize, _t: f32) {
+    fn box_frame(&self, cv: &mut Canvas, w: usize, h: usize) {
         let col = self.palette.colors[1];
         // Top border.
         for x in 0..w {

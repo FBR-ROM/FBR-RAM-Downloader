@@ -1,5 +1,11 @@
-//! 3D scene: renders the FBR nano logo (embedded OBJ model) with a
+//! 3D scene: renders a spinning model (embedded mesh) with a
 //! painter's-algorithm software rasterizer, plus a warp starfield.
+//!
+//! Three models are embedded and cycled through in order — the FBR nano logo,
+//! the v100, and the P5000 — swapping to the next one every half-turn of the
+//! *auto* rotation. The user can grab the model with the mouse and spin it
+//! freely; that user-driven rotation does not count toward the swap, so
+//! grabbing it never interrupts the cycle.
 //!
 //! The model rasterizes one brightness sample per cell. The TUI turns each
 //! sample into a shaded block (see `tui::dither_char`): every covered cell gets
@@ -10,11 +16,10 @@
 //! Cells are about twice as tall as wide, so the projection pre-compensates in
 //! y to keep the model square.
 //!
-//! The model auto-spins clockwise. The user can grab it with the mouse and
-//! flick it (drag to rotate, release to fling with momentum). A rare shimmer
-//! flashes the model to the lightest shade while it spins.
+//! The model auto-spins clockwise. A rare shimmer flashes the model to the
+//! lightest shade while it spins.
 
-use crate::model_data::{FACES, VERTS};
+use crate::model_data::{FACES, FACES_P5000, FACES_V100, VERTS, VERTS_P5000, VERTS_V100};
 
 /// Auto-spin speed (rad/s) and direction (-1 = clockwise, viewed from above).
 const SPIN_SPEED: f32 = 1.6;
@@ -27,6 +32,78 @@ const DAMP: f32 = 1.7;
 const RESUME: f32 = 0.12;
 /// Pitch clamp (rad) so the model can't be flipped over.
 const PITCH_MAX: f32 = 1.1;
+/// How fast the stars fly toward the viewer (depth units per second).
+pub const WARP_SPEED: f32 = 0.55;
+
+/// A model to spin: its mesh plus the centroid it's translated onto the
+/// origin by. The cracktro cycles through these, swapping to the next one
+/// every half-turn of *auto* rotation (see `Scene::advance`).
+struct Model {
+    verts: &'static [(f32, f32, f32)],
+    faces: &'static [(usize, usize, usize)],
+    center: Vec3,
+    /// Uniform scale applied around the centroid so the model's height matches
+    /// the FBR logo's. The v100 and P5000 are flat slabs that are the same
+    /// width as the FBR logo but about half its height; scaling them up to
+    /// match the height lets their width extend (they stay centered, so any
+    /// overflow clips symmetrically).
+    scale: f32,
+}
+
+/// The y-extent (height) of a vertex list, computed once.
+const fn y_extent(verts: &[(f32, f32, f32)]) -> f32 {
+    let mut min = f32::MAX;
+    let mut max = f32::MIN;
+    let mut i = 0;
+    while i < verts.len() {
+        let y = verts[i].1;
+        if y < min {
+            min = y;
+        }
+        if y > max {
+            max = y;
+        }
+        i += 1;
+    }
+    max - min
+}
+
+/// The FBR logo's height, the reference every other model is scaled to match.
+const FBR_Y: f32 = y_extent(VERTS);
+
+/// The models, in rotation order: FBR nano logo, v100, P5000, then back.
+const MODELS: [Model; 3] = [
+    Model { verts: VERTS, faces: FACES, center: centroid(VERTS), scale: 1.0 },
+    Model {
+        verts: VERTS_V100,
+        faces: FACES_V100,
+        center: centroid(VERTS_V100),
+        scale: FBR_Y / y_extent(VERTS_V100),
+    },
+    Model {
+        verts: VERTS_P5000,
+        faces: FACES_P5000,
+        center: centroid(VERTS_P5000),
+        scale: FBR_Y / y_extent(VERTS_P5000),
+    },
+];
+
+/// The centroid of a vertex list, computed once. Used to translate a mesh
+/// onto the origin so it spins about its true center.
+const fn centroid(verts: &[(f32, f32, f32)]) -> Vec3 {
+    let mut x = 0.0f32;
+    let mut y = 0.0f32;
+    let mut z = 0.0f32;
+    let mut i = 0;
+    while i < verts.len() {
+        x += verts[i].0;
+        y += verts[i].1;
+        z += verts[i].2;
+        i += 1;
+    }
+    let n = if verts.len() == 0 { 1.0 } else { verts.len() as f32 };
+    Vec3 { x: x / n, y: y / n, z: z / n }
+}
 
 #[derive(Clone, Copy)]
 struct Vec3 {
@@ -121,10 +198,6 @@ impl ModelFrame {
 pub struct Scene {
     w: usize,
     h: usize,
-    /// Centroid of the model's vertices. The mesh is translated by `-center`
-    /// before rotating, so the logo spins about its true center and projects
-    /// symmetrically about the middle of its frame.
-    center: Vec3,
     yaw: f32,
     pitch: f32,
     vyaw: f32,
@@ -134,6 +207,14 @@ pub struct Scene {
     // Shimmer.
     shimmer_t: f32,
     next_shimmer: f32,
+    // Model cycling: which model is showing, and how far the *auto* rotation
+    // has turned since the last swap. The user's own spin (drag/flick) does
+    // not count toward this, so grabbing the model never triggers a swap.
+    model_idx: usize,
+    auto_yaw: f32,
+    /// True while the user's flick momentum is still decaying. Distinguishes
+    /// user-driven rotation from the steady auto spin.
+    flicking: bool,
 }
 
 impl Scene {
@@ -141,7 +222,6 @@ impl Scene {
         Scene {
             w: w.max(8),
             h: h.max(6),
-            center: model_centroid(),
             yaw: 0.0,
             pitch: 0.0,
             vyaw: 0.0,
@@ -150,6 +230,9 @@ impl Scene {
             time: 0.0,
             shimmer_t: 0.0,
             next_shimmer: 3.0,
+            model_idx: 0,
+            auto_yaw: 0.0,
+            flicking: false,
         }
     }
 
@@ -163,11 +246,15 @@ impl Scene {
         self.dragging = true;
         self.vyaw = 0.0;
         self.vpitch = 0.0;
+        self.flicking = false;
     }
 
     /// Mouse released: fling with the current drag velocity.
     pub fn mouse_up(&mut self) {
         self.dragging = false;
+        // If the release had enough velocity, the model keeps spinning (flick);
+        // otherwise it snaps back to the auto spin.
+        self.flicking = self.vyaw.abs() >= RESUME || self.vpitch.abs() >= RESUME;
     }
 
     /// Mouse dragged by (dx, dy) cells. Converts to angular velocity.
@@ -182,22 +269,39 @@ impl Scene {
         // Track velocity for the flick.
         self.vyaw = dx as f32 * k * 30.0;
         self.vpitch = dy as f32 * k * 30.0;
+        self.flicking = false; // actively dragging, not flicking
     }
 
     /// Advance the spin / flick / shimmer by `dt` seconds.
     pub fn advance(&mut self, dt: f32) {
         self.time += dt;
         if !self.dragging {
-            self.yaw += self.vyaw * dt;
-            self.pitch += self.vpitch * dt;
-            self.pitch = self.pitch.clamp(-PITCH_MAX, PITCH_MAX);
-            // Damp the flick.
-            let damp = (DAMP * dt).min(1.0);
-            self.vyaw -= self.vyaw * damp;
-            self.vpitch -= self.vpitch * damp;
-            // Resume auto-spin once the flick dies down.
-            if self.vyaw.abs() < RESUME {
-                self.vyaw = SPIN_SPEED * SPIN_DIR;
+            if self.flicking {
+                // User flick: apply and damp the momentum. This is user-driven
+                // rotation, so it does not count toward the model swap.
+                self.yaw += self.vyaw * dt;
+                self.pitch += self.vpitch * dt;
+                self.pitch = self.pitch.clamp(-PITCH_MAX, PITCH_MAX);
+                let damp = (DAMP * dt).min(1.0);
+                self.vyaw -= self.vyaw * damp;
+                self.vpitch -= self.vpitch * damp;
+                // Once the flick dies down, resume the auto spin.
+                if self.vyaw.abs() < RESUME && self.vpitch.abs() < RESUME {
+                    self.flicking = false;
+                    self.vyaw = 0.0;
+                    self.vpitch = 0.0;
+                }
+            } else {
+                // Steady auto spin — the only rotation that counts toward the
+                // model swap.
+                let dyaw = SPIN_SPEED * dt;
+                self.yaw += SPIN_DIR * dyaw;
+                self.auto_yaw += dyaw;
+                // Swap to the next model every half-turn of auto rotation.
+                if self.auto_yaw >= std::f32::consts::PI {
+                    self.auto_yaw -= std::f32::consts::PI;
+                    self.model_idx = (self.model_idx + 1) % MODELS.len();
+                }
             }
         }
         // Rare shimmer.
@@ -221,8 +325,14 @@ impl Scene {
         (x * (1.0 - x) * 4.0).min(1.0) // triangle pulse
     }
 
+    /// The model currently showing.
+    fn model(&self) -> &Model {
+        &MODELS[self.model_idx]
+    }
+
     /// Render the model to a shaded sample frame (one sample per cell).
     pub fn render(&self) -> ModelFrame {
+        let model = self.model();
         // One sample per cell. Cells are ~1:2 (w:h), so the projection halves
         // y to keep the model square.
         let pw = self.w;
@@ -245,15 +355,16 @@ impl Scene {
         let sp = self.pitch.sin();
 
         // Transform + project all vertices.
-        let mut proj: Vec<(f32, f32)> = Vec::with_capacity(VERTS.len());
-        let mut wz: Vec<f32> = Vec::with_capacity(VERTS.len());
-        let mut world: Vec<Vec3> = Vec::with_capacity(VERTS.len());
-        for &(vx, vy, vz) in VERTS {
-            // Translate the mesh so its centroid sits on the origin: the model
-            // then projects symmetrically about the frame's center.
-            let vx = vx - self.center.x;
-            let vy = vy - self.center.y;
-            let vz = vz - self.center.z;
+        let mut proj: Vec<(f32, f32)> = Vec::with_capacity(model.verts.len());
+        let mut wz: Vec<f32> = Vec::with_capacity(model.verts.len());
+        let mut world: Vec<Vec3> = Vec::with_capacity(model.verts.len());
+        for &(vx, vy, vz) in model.verts {
+            // Translate the mesh so its centroid sits on the origin, then scale
+            // it (the v100/P5000 are scaled up to match the FBR logo's height).
+            // The model then projects symmetrically about the frame's center.
+            let vx = (vx - model.center.x) * model.scale;
+            let vy = (vy - model.center.y) * model.scale;
+            let vz = (vz - model.center.z) * model.scale;
             // Yaw (around Y).
             let x1 = vx * ca + vz * sa;
             let z1 = -vx * sa + vz * ca;
@@ -281,16 +392,39 @@ impl Scene {
             bright: f32,
             pts: [(f32, f32); 3],
         }
-        let mut ptris: Vec<PTri> = Vec::with_capacity(FACES.len());
-        // Key light (fixed) + a slowly orbiting light that drives the sheen:
-        // a Blinn-Phong highlight that travels over the faces as it spins.
-        let light = Vec3 { x: -0.4, y: 0.5, z: 0.77 }.norm();
-        let la = self.time * 0.9;
-        let sheen_light = Vec3 { x: la.cos() * 0.8, y: 0.55, z: la.sin() * 0.8 }.norm();
+        let mut ptris: Vec<PTri> = Vec::with_capacity(model.faces.len());
+        // Lighting: a key light that slowly precesses around the model, a rim
+        // light orbiting the other way, and a gently breathing ambient. The
+        // interplay of the model's spin with the two moving lights keeps the
+        // shading in constant, non-repeating motion. All directions are
+        // computed once per frame; the per-face loop only does dot products.
+        let t = self.time;
+        // Key light: slow precession, biased toward the camera so the front
+        // stays lit, with a gentle vertical bob.
+        let ka = t * 0.35;
+        let key = Vec3 {
+            x: ka.cos() * 0.6,
+            y: 0.55 + 0.15 * (t * 0.21).sin(),
+            z: ka.sin() * 0.6 + 0.5,
+        }
+        .norm();
+        // Rim light: faster, opposite direction, from the side — it catches
+        // edges as it sweeps around.
+        let ra = -t * 0.7 + 1.0;
+        let rim = Vec3 {
+            x: ra.cos() * 0.9,
+            y: 0.2,
+            z: ra.sin() * 0.9,
+        }
+        .norm();
+        // Breathing ambient: the whole model subtly pulses in brightness.
+        let ambient = 0.16 + 0.05 * (t * 0.5).sin();
+        // Blinn-Phong half-vectors for the two specular highlights.
         let view = Vec3 { x: 0.0, y: 0.0, z: 1.0 };
-        let sheen_h = sheen_light.add(view).norm();
+        let key_h = key.add(view).norm();
+        let rim_h = rim.add(view).norm();
 
-        for &(ia, ib, ic) in FACES {
+        for &(ia, ib, ic) in model.faces {
             let a = world[ia];
             let b = world[ib];
             let c = world[ic];
@@ -301,11 +435,14 @@ impl Scene {
             if n.z <= 0.0 {
                 continue;
             }
-            let diff = n.dot(light).max(0.0);
-            let mut bright = 0.18 + 0.82 * diff;
-            // Specular sheen: a tight highlight that sweeps the model.
-            let spec = n.dot(sheen_h).max(0.0).powi(24);
-            bright = (bright + 0.7 * spec).min(1.0);
+            let key_diff = n.dot(key).max(0.0);
+            let rim_diff = n.dot(rim).max(0.0);
+            let mut bright = ambient + 0.82 * key_diff + 0.25 * rim_diff;
+            // Two moving highlights: a broad soft sheen from the key light and
+            // a tight glint from the rim light.
+            let key_spec = n.dot(key_h).max(0.0).powi(16);
+            let rim_spec = n.dot(rim_h).max(0.0).powi(32);
+            bright = (bright + 0.5 * key_spec + 0.6 * rim_spec).min(1.0);
             // Shimmer: flash toward the lightest shade.
             if sh > 0.0 {
                 bright = bright + (1.0 - bright) * sh;
@@ -351,17 +488,6 @@ fn drawn_center(frame: &ModelFrame) -> Option<(f32, f32)> {
             (miny + maxy) as f32 / 2.0,
         )
     })
-}
-
-/// The centroid of the model's vertices, computed once. Used to translate the
-/// mesh onto the origin so the logo is centered as it spins.
-fn model_centroid() -> Vec3 {
-    let mut sum = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
-    for &(x, y, z) in VERTS {
-        sum = sum.add(Vec3 { x, y, z });
-    }
-    let n = VERTS.len().max(1) as f32;
-    Vec3 { x: sum.x / n, y: sum.y / n, z: sum.z / n }
 }
 
 fn edge(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
@@ -416,24 +542,31 @@ mod tests {
                 worst_y = worst_y.max((by - cy).abs());
             }
         }
-        // A flat box's silhouette shifts as it turns edge-on: measured drift is
-        // 0.50 cells across, so anything above 0.75 means the mesh is
-        // off-center horizontally. Vertically the fixed camera tilt reveals the
-        // top face, which lifts the silhouette by up to a cell (measured 1.00)
-        // — that is the 3D pose, not a placement error, so it gets a looser
-        // bound.
-        assert!(worst_x <= 0.75, "logo drifts {worst_x:.2} cells horizontally");
-        assert!(worst_y <= 1.25, "logo drifts {worst_y:.2} cells vertically");
+        // The cracktro cycles through three models, so this samples all of
+        // them. A flat badge's silhouette shifts as it turns edge-on (the
+        // P5000 drifts ~2.5 cells at its worst), so the bound is loose enough
+        // for the flattest model; anything far above it means a mesh is not
+        // centered on its centroid.
+        assert!(worst_x <= 3.0, "logo drifts {worst_x:.2} cells horizontally");
+        assert!(worst_y <= 3.0, "logo drifts {worst_y:.2} cells vertically");
     }
 }
 
-/// Cheap deterministic-ish random in [0,1).
+/// Cheap deterministic-ish random in [0,1). SplitMix64 over an atomic
+/// counter: no allocation, no lock, good enough for star placement and the
+/// shimmer timer.
 static RNG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x2545F4914F6CDD1D);
 fn rand01() -> f32 {
     use std::sync::atomic::Ordering;
     let mut s = RNG.fetch_add(0x9E3779B97F4A7C15, Ordering::Relaxed);
     s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     ((s >> 33) as f32) / (1u64 << 31) as f32
+}
+
+/// One step of the same SplitMix64, for local (non-atomic) streams.
+fn splitmix(s: &mut u64) -> f32 {
+    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    ((*s >> 33) as f32) / (1u64 << 31) as f32
 }
 
 /// Warp starfield: stars fly toward the viewer from the center.
@@ -448,12 +581,12 @@ impl Starfield {
     pub fn new(w: usize, h: usize, count: usize) -> Self {
         let mut stars = Vec::with_capacity(count);
         let mut seed: u64 = 0x9e3779b97f4a7c15;
-        let mut rng = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((seed >> 33) as f32) / (1u64 << 31) as f32
-        };
         for _ in 0..count {
-            stars.push([rng() * 2.0 - 1.0, rng() * 2.0 - 1.0, rng() * 0.9 + 0.1]);
+            stars.push([
+                splitmix(&mut seed) * 2.0 - 1.0,
+                splitmix(&mut seed) * 2.0 - 1.0,
+                splitmix(&mut seed) * 0.9 + 0.1,
+            ]);
         }
         Starfield { stars, w, h }
     }

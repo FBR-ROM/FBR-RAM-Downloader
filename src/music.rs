@@ -56,7 +56,7 @@ impl Music {
                 p.is_file()
                     && p.extension()
                         .and_then(|e| e.to_str())
-                        .map(|e| EXTS.contains(&e.to_lowercase().as_str()))
+                        .map(|e| EXTS.iter().any(|x| x.eq_ignore_ascii_case(e)))
                         .unwrap_or(false)
             })
             .collect();

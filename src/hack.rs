@@ -3,8 +3,8 @@
 //! The TUI drives everything through this trait. Today it's backed by
 //! [`StubHack`], which simulates a RAM download so the UI can be developed
 //! and demoed standalone. To wire in the real C hack, implement [`Hack`]
-//! around your `extern "C"` bindings (see the example at the bottom) and
-//! swap it in in `main.rs`.
+//! around your `extern "C"` bindings (worked example in the README) and swap
+//! it in in `main.rs`.
 
 /// Snapshot of hack progress, polled once per frame by the TUI.
 #[derive(Debug, Clone)]
@@ -85,49 +85,3 @@ impl Hack for StubHack {
         Ok(())
     }
 }
-
-/*
-// ---------------------------------------------------------------------------
-// Example: wiring in the real C hack.
-//
-// 1. Drop your C source in `src/hack.c` (or link a prebuilt lib via
-//    [build-dependencies] cc / a .a file).
-// 2. Declare the C ABI:
-//
-//      #[link(name = "hack")]
-//      extern "C" {
-//          fn hack_start() -> i32;          // 0 on success
-//          fn hack_progress() -> f32;       // 0.0 ..= 1.0
-//          fn hack_status(buf: *mut u8, len: usize) -> i32;
-//          fn hack_done() -> i32;           // 1 when finished
-//          fn hack_finish() -> i32;
-//      }
-//
-// 3. Implement the trait:
-//
-//      pub struct CHack;
-//      impl Hack for CHack {
-//          fn start(&mut self) -> Result<(), String> {
-//              if unsafe { hack_start() } == 0 { Ok(()) } else { Err("start failed".into()) }
-//          }
-//          fn poll(&mut self) -> HackState {
-//              let mut buf = [0u8; 128];
-//              unsafe { hack_status(buf.as_mut_ptr(), buf.len()); }
-//              let status = String::from_utf8_lossy(&buf)
-//                  .split('\0').next().unwrap_or("").to_string();
-//              HackState {
-//                  progress: unsafe { hack_progress() },
-//                  status,
-//                  done: unsafe { hack_done() } != 0,
-//                  error: None,
-//              }
-//          }
-//          fn finish(&mut self) -> Result<(), String> {
-//              unsafe { hack_finish() };
-//              Ok(())
-//          }
-//      }
-//
-// 4. In main.rs: `let mut hack = CHack;`
-// ---------------------------------------------------------------------------
-*/

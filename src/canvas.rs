@@ -38,38 +38,81 @@ impl Palette {
         }
     }
 
-    /// Map a brightness (0..=1) to one of the 4 exact shades (quantized, no
-    /// interpolation). 1.0 = lightest, 0.0 = darkest.
+    /// Quantize a brightness (0..=1) to a palette index: 1.0 = lightest,
+    /// 0.0 = darkest. No interpolation — the Game Boy way.
+    fn shade_index(brightness: f32) -> usize {
+        ((1.0 - brightness.clamp(0.0, 1.0)) * 3.0).round() as usize
+    }
+
+    /// Map a brightness (0..=1) to one of the 4 exact shades.
     pub fn shade(&self, brightness: f32) -> (u8, u8, u8) {
-        let idx = ((1.0 - brightness.clamp(0.0, 1.0)) * 3.0).round() as usize;
-        self.colors[idx.min(3)]
+        self.colors[Self::shade_index(brightness).min(3)]
     }
 
     /// 4-shade shimmer: a brightness mapped to a shade, then shifted through
     /// the palette over time. This is the Game Boy "color cycle" effect.
     pub fn cycle_shade(&self, brightness: f32, t: f32, phase: f32) -> (u8, u8, u8) {
-        let base = ((1.0 - brightness.clamp(0.0, 1.0)) * 3.0).round() as usize;
+        let base = Self::shade_index(brightness);
         let shift = (((t * 0.5 + phase).rem_euclid(1.0)) * 4.0) as usize;
         self.colors[(base + shift) % 4]
     }
 
-    /// Return a copy of the palette with the shade that would be invisible
-    /// against the terminal background swapped for the next shade in.
+    /// Minimum luminance distance (0..255) a foreground shade must keep from
+    /// the terminal background to stay visible.
+    const CONTRAST: f32 = 32.0;
+
+    /// Perceptual luminance (Rec. 709), 0..255.
+    fn luminance((r, g, b): (u8, u8, u8)) -> f32 {
+        0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32
+    }
+
+    /// Return a copy of the palette with every shade that would be invisible
+    /// against the terminal background swapped for the nearest visible one.
     ///
     /// The cracktro is foreground-only, so a glyph drawn in a color that
-    /// matches the background simply vanishes. In a dark terminal the darkest
-    /// shade (index 3) is near-black and disappears; in a light terminal the
-    /// lightest shade (index 0) is near-white and disappears. Every text color
-    /// in the TUI derives from `self.colors`, so remapping the array once here
-    /// keeps all of them visible.
-    pub fn remap_for(&self, dark: bool) -> Self {
+    /// matches the background vanishes. We compare each shade's luminance to
+    /// the background's and, for any that are too close, pick the palette
+    /// entry that is both visible and closest in brightness — the smallest
+    /// change that keeps the shade readable. This handles mid-tone
+    /// backgrounds (e.g. a grey theme) that a simple dark/light split gets
+    /// wrong.
+    ///
+    /// `bg` is the terminal's actual background color (OSC 11 query). When it
+    /// is `None` — the terminal didn't answer, or we have no TTY — we can't
+    /// know the theme, so we make every shade visible on *both* a black and a
+    /// white background. That guarantees contrast no matter what the terminal
+    /// is actually using, which is the safe default for a foreground-only
+    /// cracktro.
+    pub fn remap_for(&self, bg: Option<(u8, u8, u8)>) -> Self {
+        // The background luminance we must clear. `None` = unknown theme, in
+        // which case a shade must survive both black (lum 0) and white
+        // (lum 255).
+        let bg_lum: Option<f32> = bg.map(Self::luminance);
+        let visible = |c: (u8, u8, u8)| match bg_lum {
+            Some(bl) => (Self::luminance(c) - bl).abs() >= Self::CONTRAST,
+            None => {
+                let l = Self::luminance(c);
+                l >= Self::CONTRAST && l <= 255.0 - Self::CONTRAST
+            }
+        };
         let mut colors = self.colors;
-        if dark {
-            // Dark background: the darkest shade is invisible -> use shade 2.
-            colors[3] = colors[2];
-        } else {
-            // Light background: the lightest shade is invisible -> use shade 1.
-            colors[0] = colors[1];
+        for i in 0..4 {
+            if !visible(colors[i]) {
+                let target = Self::luminance(colors[i]);
+                let best = self
+                    .colors
+                    .iter()
+                    .copied()
+                    .filter(|c| visible(*c))
+                    .min_by(|a, b| {
+                        let da = (Self::luminance(*a) - target).abs();
+                        let db = (Self::luminance(*b) - target).abs();
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                if let Some(c) = best {
+                    colors[i] = c;
+                }
+            }
         }
         Palette { colors }
     }
@@ -89,15 +132,15 @@ pub struct Canvas {
 }
 
 impl Canvas {
-    /// Create a canvas of blank cells. Nothing paints a background: the
-    /// cracktro draws foreground glyphs only, so it renders correctly on any
-    /// terminal, any theme, and any font — it never assumes or overrides the
+    /// A canvas of blank cells. Nothing paints a background: the cracktro
+    /// draws foreground glyphs only, so it renders correctly on any terminal,
+    /// any theme, and any font — it never assumes or overrides the
     /// terminal's own background.
-    pub fn new(w: usize, h: usize, bg: (u8, u8, u8)) -> Self {
+    pub fn new(w: usize, h: usize) -> Self {
         Canvas {
             w,
             h,
-            cells: vec![Cell { ch: ' ', fg: bg, bold: false }; w * h],
+            cells: vec![Cell { ch: ' ', fg: (0, 0, 0), bold: false }; w * h],
         }
     }
 
@@ -133,7 +176,8 @@ impl Canvas {
     }
 
     /// Render to a truecolor ANSI string. Emits a color change only when the
-    /// color actually differs from the previous cell (keeps output small).
+    /// color actually differs from the previous cell (keeps output small);
+    /// blank cells never change color, so runs of them stay cheap.
     pub fn to_ansi(&self) -> String {
         let mut out = String::with_capacity(self.w * self.h * 3);
         let mut cur_fg: (u8, u8, u8) = (0, 0, 0);
@@ -141,13 +185,15 @@ impl Canvas {
         for y in 0..self.h {
             for x in 0..self.w {
                 let c = &self.cells[y * self.w + x];
-                if c.fg != cur_fg {
-                    out.push_str(&format!("\x1b[38;2;{};{};{}m", c.fg.0, c.fg.1, c.fg.2));
-                    cur_fg = c.fg;
-                }
-                if c.bold != cur_bold {
-                    out.push_str(if c.bold { "\x1b[1m" } else { "\x1b[22m" });
-                    cur_bold = c.bold;
+                if c.ch != ' ' {
+                    if c.fg != cur_fg {
+                        out.push_str(&format!("\x1b[38;2;{};{};{}m", c.fg.0, c.fg.1, c.fg.2));
+                        cur_fg = c.fg;
+                    }
+                    if c.bold != cur_bold {
+                        out.push_str(if c.bold { "\x1b[1m" } else { "\x1b[22m" });
+                        cur_bold = c.bold;
+                    }
                 }
                 out.push(c.ch);
             }
@@ -160,7 +206,7 @@ impl Canvas {
     }
 
     /// Write the canvas into a ratatui [`Buffer`], which the `Terminal` diffs
-    /// against its previous frame and flushes to the terminal. Only non-blank
+    /// against the previous frame and flushes to the terminal. Only non-blank
     /// cells are written: the buffer is already blank, and skipping them keeps
     /// the diff small. The buffer must be at least `w` x `h`; out-of-range
     /// cells are dropped (the terminal is never smaller than the canvas).
@@ -181,6 +227,66 @@ impl Canvas {
                         Modifier::empty()
                     };
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Palette;
+
+    /// The remap's contract: after remapping against a background, no shade
+    /// may be invisible against it. This is the whole point of the remap —
+    /// the cracktro is foreground-only, so a shade that matches the background
+    /// vanishes. Check both palettes across a sweep of backgrounds, including
+    /// the mid-tones a naive dark/light split gets wrong.
+    #[test]
+    fn remap_keeps_every_shade_visible() {
+        let bgs = [
+            (0, 0, 0),
+            (30, 30, 30),
+            (40, 44, 52),
+            (64, 64, 64),
+            (85, 85, 85),
+            (128, 128, 128),
+            (200, 200, 200),
+            (245, 245, 245),
+            (255, 255, 255),
+        ];
+        for pal in [Palette::green(), Palette::grey()] {
+            for bg in bgs {
+                let remapped = pal.remap_for(Some(bg));
+                let bl = Palette::luminance(bg);
+                for c in remapped.colors {
+                    let d = (Palette::luminance(c) - bl).abs();
+                    assert!(
+                        d >= Palette::CONTRAST,
+                        "shade {:?} invisible against bg {:?} (dist {})",
+                        c,
+                        bg,
+                        d
+                    );
+                }
+            }
+        }
+    }
+
+    /// A background we couldn't detect (`None`) must fall back to a palette
+    /// that is visible on *both* a black and a white background — so contrast
+    /// is guaranteed no matter what the terminal is actually using.
+    #[test]
+    fn remap_none_visible_on_both_themes() {
+        for pal in [Palette::green(), Palette::grey()] {
+            let remapped = pal.remap_for(None);
+            for c in remapped.colors {
+                let l = Palette::luminance(c);
+                assert!(
+                    l >= Palette::CONTRAST && l <= 255.0 - Palette::CONTRAST,
+                    "shade {:?} not visible on both black and white (lum {})",
+                    c,
+                    l
+                );
             }
         }
     }

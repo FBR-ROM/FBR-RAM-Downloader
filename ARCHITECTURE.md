@@ -7,9 +7,9 @@ way it is. For usage see [README.md](README.md); for the plug-in interface see
 ## 1. What this is
 
 A terminal cracktro — the small, self-contained intro that a cracking group
-bolts onto a release. It plays a warp starfield, a big blocky title, a spinning
-3D logo, a progress "loader" with a shimmer, a scrolling greeting, and a
-blow-away ending, all in the 4 colours of a Game Boy screen.
+bolts onto a release. It plays a warp starfield, a shimmering border title, a
+spinning 3D logo, a progress "loader" with a shimmer, a scrolling greeting, and
+a blow-away ending, all in the 4 colours of a Game Boy screen.
 
 It is deliberately a *presentation layer*. The real RAM-unlock work sits behind
 one small trait, so the visuals can be developed, demoed and reviewed on their
@@ -30,23 +30,25 @@ These are not preferences; they are the rules the whole design falls out of.
    bleed over the border — from a 20x8 window to a 240x120 one.
 4. **Deterministic and testable.** Rendering is a pure function of state, so it
    can be driven headlessly (`--dump`) and unit-tested without a terminal.
-5. **No dependencies beyond the terminal library.** The only crate is
-   `crossterm`; the rasterizer, palette logic and layout are hand-rolled.
+5. **A small, boring dependency set.** The only crates are `crossterm`
+   (terminal I/O), `ratatui` (back-buffer diffing), `rodio` (in-process audio),
+   and `libc` (the OSC 11 background query). The rasterizer, palette logic and
+   layout are hand-rolled.
 
 ## 3. Module map
 
 | File | Lines | Responsibility |
 |------|-------|----------------|
-| `src/main.rs` | ~320 | Entry point, argument parsing, the event loop, live resize, headless `--dump`, `--layout` probe, terminal setup/teardown |
-| `src/tui.rs` | ~730 | The cracktro itself: layout, screen elements, the loader, the scroller, the ending, and the layout tests |
-| `src/scene.rs` | ~490 | 3D pipeline (model transform, projection, culling, painter's algorithm, rasterization, shading) plus the warp starfield |
-| `src/canvas.rs` | ~140 | The 4-colour palettes, quantization/shimmer helpers, the cell grid, and ANSI serialization |
-| `src/model_data.rs` | ~184 | Generated mesh data: 56 vertices, 120 triangles (do not edit by hand) |
-| `src/hack.rs` | ~133 | The `Hack` trait, `HackState`, the simulated `StubHack`, and a worked C-binding example |
-| `src/music.rs` | ~150 | Optional looping background music, auto-detected and toggled at runtime |
-| `gen_model.py` | ~45 | Rasterizes `FBR nano.svg` into `model_data.rs` |
+| `src/main.rs` | ~447 | Entry point, argument parsing, the event loop, live resize, headless `--dump`, `--layout` probe, background-color detection, terminal setup/teardown |
+| `src/tui.rs` | ~703 | The cracktro itself: layout, screen elements, the loader, the scroller, the ending, and the layout tests |
+| `src/scene.rs` | ~592 | 3D pipeline (model transform, projection, culling, painter's algorithm, rasterization, dynamic lighting, model cycling) plus the warp starfield |
+| `src/canvas.rs` | ~272 | The 4-colour palettes, quantization/shimmer helpers, the background-contrast remap, the cell grid, and ANSI serialization |
+| `src/model_data.rs` | ~8800 | Generated mesh data for the three models (do not edit by hand) |
+| `src/hack.rs` | ~87 | The `Hack` trait, `HackState`, and the simulated `StubHack` |
+| `src/music.rs` | ~153 | Optional looping background music (in-process via `rodio`), auto-detected and toggled at runtime |
+| `gen_models.py` | ~165 | Regenerates `model_data.rs` from the three sources in `models/` (weld, decimate, normalize) |
 | `make_gif.py` | ~106 | Renders dumped ANSI frames to an animated GIF (for previews) |
-| `demo.sh` | ~41 | One-command build + run, including a `nix-shell` fallback for `mpv` |
+| `demo.sh` | ~31 | One-command build + run |
 
 Dependency direction is one-way and shallow:
 
@@ -79,13 +81,12 @@ Starfield::render(dt) ──> Frame (glyph + brightness per cell)
                      ├─ starfield cells             -> inner area
                      ├─ box frame + border title    -> row 0 / h-1 / col 0 / w-1
                      ├─ key hints                    -> row 0, right-aligned
-                     ├─ big FBR title                -> rows 1..6
                      ├─ 3D logo, dithered blocks     -> centered in its region
                      ├─ loader label + bar + status  -> rows h-5..h-3
                      └─ scroller                     -> row h-1
                      │
                      v
-              Canvas::to_ansi() ──> one string, written in a single Print
+        Canvas::to_buffer() ──> ratatui back-buffer, diffed and flushed
 ```
 
 Drawing order matters: later writes win, which is how text lands on top of the
@@ -119,18 +120,40 @@ an escape sequence only when the colour or weight *changes* from the previous
 cell, which keeps frames small (~1.5 KB for a 100x30 frame). It never emits
 background codes.
 
+Because the cracktro is foreground-only, a shade that matches the terminal's
+background would be invisible. `Palette::remap_for(bg)` fixes this: it compares
+each of the four shades' luminance to the background's and swaps any that are
+too close for the nearest visible one. The background is the terminal's actual
+color, read with an OSC 11 query at startup (`main.rs::detect_background`);
+`--dark`/`--light` force the assumption, and a non-answering terminal falls
+back to a set of shades that is visible on both a black and a white
+background. This is what makes the cracktro read correctly on light, dark,
+*and* mid-tone (grey) themes.
+
 ## 6. The 3D pipeline (`scene.rs`)
 
-**Mesh.** 56 vertices, 120 triangles, generated from `FBR nano.svg` by
-`gen_model.py` (which rasterizes the SVG into an extruded mark and emits
-triangulated faces). The result is a flat slab roughly 1.0 x 1.0 x 0.28 model
-units.
+**Mesh.** Three embedded models, in rotation order: the FBR nano logo (56
+verts, 120 tris, used as-is), the v100, and the P5000. The two big models are
+decimated to ~2000 triangles (keeping the largest-area triangles, which
+preserves the silhouette) and normalized so their largest extent is 1.0 and
+they're centered on the origin. `gen_models.py` regenerates `model_data.rs`
+from the sources in `models/`.
 
-**Centering.** On construction the mesh's **centroid** is computed
-(`model_centroid`) and every vertex is translated by `-centroid` before
-rotating. Without this the slab (whose x range is `-0.534..0.466`) spins about
-a point that is not its middle, and the visible logo sits off-centre by a
-couple of cells. With it, measured drift over a full spin is 0.5 cells.
+**Height matching.** The v100 and P5000 are flat slabs that are the same width
+as the FBR logo but about half its height. Each carries a uniform `scale`
+(computed at startup as `FBR_Y / y_extent(model)`) applied around its centroid
+so its height matches the FBR logo's; the width extends proportionally and,
+being centered, any overflow clips symmetrically at the frame edge.
+
+**Model cycling.** The cracktro swaps to the next model every half-turn of the
+*auto* rotation (`auto_yaw` accumulates only the steady auto spin, not the
+user's drag/flick, so grabbing the model never triggers a swap). Each model
+carries its own centroid, computed once at startup.
+
+**Centering.** Every vertex is translated by `-centroid` before rotating.
+Without this a mesh spins about a point that is not its middle and sits
+off-centre by a couple of cells. With it, the model projects symmetrically
+about the frame's center.
 
 **Transform.** Per vertex: yaw around Y (auto-spin, `SPIN_SPEED = 1.6 rad/s`,
 clockwise), pitch around X (mouse-driven, clamped to `PITCH_MAX = 1.1`), then a
@@ -153,12 +176,20 @@ the painter's algorithm.
 `ModelFrame::set` keeps the *brighter* sample when triangles overlap, which is
 what makes front faces win.
 
-**Shading.** Two lights:
+**Shading.** Three dynamic lights, all computed once per frame:
 
-- a fixed key light `(-0.4, 0.5, 0.77)` for the base flat shading
-  (`brightness = 0.18 + 0.82 * max(n · L, 0)`), and
-- a light that orbits at `0.9 rad/s`, driving a tight Blinn-Phong specular
-  term (`max(n · H, 0)^24 * 0.7`) — the sheen that sweeps the faces.
+- a **key light** that slowly precesses around the model (biased toward the
+  camera so the front stays lit, with a gentle vertical bob) for the base flat
+  shading,
+- a **rim light** orbiting the other way, from the side, which catches edges as
+  it sweeps around, and
+- a **breathing ambient** that subtly pulses the whole model.
+
+Each of the two directional lights also drives a Blinn-Phong specular highlight
+(a broad soft sheen from the key, a tight glint from the rim). The interplay of
+the model's spin with the two moving lights keeps the shading in constant,
+non-repeating motion — this is what reveals the detail in the simplified
+meshes.
 
 A rare shimmer (a 0.4 s pulse every 3–7 s) flashes the model toward the lightest
 shade. Mouse input can grab the model: dragging rotates it, releasing flings it
@@ -176,12 +207,11 @@ truth for the renderer.
 
 ```
 borders      row 0, row h-1, col 0, col w-1
-title        rows 1 ..= 1 + TITLE_ROWS + SHADOW_ROWS
 loader       rows h-5 ..= h-3      (label, bar, status)
 breathing    row  h-2
 scroller     row  h-1
 region       rows region_top ..= region_bottom
-               region_top    = 1 + TITLE_ROWS + SHADOW_ROWS   (= 7)
+               region_top    = 1
                region_bottom = h - 1 - BREATH_ROWS - LOADER_ROWS
 model        largest breakpoint (mw, mh) with
                mw <= w - 4  and  mh <= region_h
@@ -190,7 +220,7 @@ model        largest breakpoint (mw, mh) with
 ```
 
 **Model size** comes from a fixed breakpoint table (`MODEL_BREAKPOINTS`), largest
-first: `48x24, 40x20, 32x16, 24x12, 18x9, 14x7, 10x5`. Cells are ~1:2, so a
+first: `56x28, 48x24, 40x20, 32x16, 24x12, 18x9, 14x7, 10x5`. Cells are ~1:2, so a
 square model is twice as wide as it is tall. The largest entry that fits both
 the available width and the region's rows is used; below the smallest the model
 is omitted rather than drawn as a sliver. Discrete tiers (rather than a
@@ -220,13 +250,10 @@ multiplexers do not deliver. A stale size would mis-frame the whole composition
   clamped inside it; only the frame characters ever occupy row 0 / row h-1 /
   col 0 / col w-1.
 - **Border title** — `CRACKED BY FBR ROM` centred on the top border, colour
-  cycled per character.
+  cycled per character. The live terminal size is drawn top-left.
 - **Key hints** — `M MUTE • Q QUIT`, right-aligned on the top border in the mid
   shade (deliberately understated), drawn only when it cannot collide with the
   title.
-- **Big title** — `FBR` in a 4-row blocky font (`BIG_FONT`), with an extruded
-  drop shadow in the mid shade that is *masked* by the glyph face so counters
-  and gaps stay open. The face shimmers through the palette.
 - **Loader** — `DOWNLOADING RAM`, a progress bar, and a status line, anchored to
   the bottom just above the scroller with one blank row of breathing space. The
   bar is shade 2 only, with a shade-1 dithered shimmer (`█▓▒`) that sweeps the
@@ -269,25 +296,29 @@ implementation.
 ## 11. Music
 
 `music::Music` resolves a track (an explicit `--music FILE`, else the first
-audio file in `music/` alphabetically) and spawns the first available player
-from `mpv → ffplay → paplay → aplay`, looping. If no player exists it degrades
-to silence rather than failing. `toggle()` stops or restarts playback, which is
-what the `m` key does. The child process is killed on drop, so music never
-outlives the program. `demo.sh` wraps the run in `nix-shell -p mpv` when no
-player is installed, so the track still plays on NixOS.
+audio file in `music/` alphabetically) and decodes + plays it **in-process**
+via `rodio`, looping. No external player (mpv/ffplay) is needed, so the binary
+is fully self-contained. If there is no audio device, or the file can't be
+opened/decoded, it degrades to silence rather than failing (the cracktro still
+runs). `toggle()` pauses or resumes the sink, which is what the `m` key does.
+The stream and sink are dropped on exit, so music never outlives the program.
 
 ## 12. The main loop
 
 - Fixed ~30 fps tick (33 ms).
-- Each iteration: re-read the terminal size; drain pending events (`q` quit,
-  `m` mute, `Resize`, mouse down/drag/up); compute `dt` (clamped to 100 ms so a
-  stall cannot fling the animation); advance the scene; poll the hack; render;
-  write the frame.
-- Frames are written with a single `Print` after `MoveTo(0, 0)`. After a resize
-  the reflowed content is cleared and redrawn **in the same batch**, so there is
-  no blank flash between them.
-- Terminal state (raw mode, alternate screen, mouse capture, cursor) is restored
-  on every exit path, including errors.
+- Each iteration: re-read the terminal size (a cheap ioctl, so resizes are
+  picked up even when the terminal doesn't deliver a `Resize` event); drain
+  pending events (`q` quit, `m` mute, mouse down/drag/up); compute `dt`
+  (clamped to 100 ms so a stall cannot fling the animation); advance the scene;
+  poll the hack; render; write the frame.
+- The frame is rendered into a `Canvas`, then handed to ratatui's `draw`, which
+  auto-resizes its back-buffer to the real terminal size, diffs it against the
+  previous frame, and writes only the changed cells. So a resize reflows
+  cleanly with no blank flash and no full-screen reprint.
+- Terminal state (raw mode, alternate screen, mouse capture, cursor) is
+  restored on every exit path, including errors — and the teardown is
+  best-effort, so a failure there can't mask the real result or skip the
+  music/hack cleanup.
 
 ## 13. Headless modes and tooling
 
@@ -299,11 +330,12 @@ player is installed, so the track still plays on NixOS.
   terminal) and exits — the probe used to verify framing across sizes.
 - `make_gif.py` parses the dumped ANSI into a grid and rasterizes it with
   M+ Nerd Font Mono into an animated GIF, used for the repo preview.
-- `gen_model.py` regenerates `model_data.rs` from the SVG source.
+- `gen_models.py` regenerates `model_data.rs` from the three sources in
+  `models/` (weld, decimate, normalize).
 
 ## 14. Testing and verification
 
-Six unit tests run with `cargo test`, all in `tui.rs` and `scene.rs`:
+Eight unit tests run with `cargo test`, in `tui.rs`, `scene.rs` and `canvas.rs`:
 
 - the model never touches the border;
 - the model always stays inside its region;
@@ -311,8 +343,13 @@ Six unit tests run with `cargo test`, all in `tui.rs` and `scene.rs`:
   `MODEL_V_BIAS` (never above centre);
 - the loader block is ordered and inside the border;
 - the model clears the loader;
-- the drawn logo stays within 0.75 cells of its frame centre over a full spin
-  (measured 0.50).
+- the drawn model stays within 3 cells of its frame centre over a full spin
+  across all three models (the flat badges drift more as they turn edge-on);
+- the background-contrast remap keeps every palette shade visible against a
+  sweep of backgrounds (both palettes), including the mid-tones a naive
+  dark/light split gets wrong;
+- a non-detected background falls back to shades visible on both black and
+  white.
 
 Beyond the unit tests, two sweep scripts were used during development (kept out
 of the repo): a 224-size layout sweep asserting containment and placement, and a
@@ -324,19 +361,20 @@ why those flags exist.
 
 - **Hand-rolled rasterizer over a 3D crate.** The whole point is a tiny,
   dependency-light binary whose output is byte-deterministic and testable. The
-  model is 120 triangles; a software rasterizer is a few dozen lines and gives
-  exact control over quantization.
+  models are at most ~2000 triangles; a software rasterizer is a few dozen lines
+  and gives exact control over quantization.
 - **One brightness sample per cell, shaded by glyph density.** Two earlier
   approaches were tried and rejected: ASCII ramp characters (`. : - = + * # @`)
   read as a sparse sketch rather than a solid object, and flat solid blocks
   (`█` with a background fill) looked flat *and* required painting a background.
   Density-dithered blocks (`░▒▓█`) give a solid silhouette, real shading, and no
   background at all.
-- **No background painting.** The program paints nothing behind its glyphs. This
-  costs the ability to control contrast, but it is the only way the cracktro can
-  claim to work on any terminal, any theme and any font. It also means the
-  lightest palette entry can be low-contrast on a light theme — accepted, since
-  portability was the explicit requirement.
+- **No background painting.** The program paints nothing behind its glyphs.
+  This is the only way the cracktro can claim to work on any terminal, any
+  theme and any font. The cost — a foreground shade can match the background —
+  is handled by the startup contrast remap (`Palette::remap_for`), which swaps
+  any invisible shade for the nearest visible one, so the lightest entry no
+  longer washes out on a light theme.
 - **Discrete size breakpoints over continuous scaling.** Fewer, predictable
   sizes keep the model crisp and the composition stable, and make the layout
   provably correct rather than approximately correct.
@@ -352,12 +390,15 @@ why those flags exist.
 ## 16. Extending it
 
 - **Change the scroller text** — edit `GREETINGS` in `src/tui.rs`.
-- **Change the logo's spin** — `SPIN_SPEED` / `SPIN_DIR` in `src/scene.rs`.
-- **Change the model** — replace the SVG and run `gen_model.py`, or hand-edit
-  `model_data.rs`.
+- **Change the model's spin** — `SPIN_SPEED` / `SPIN_DIR` in `src/scene.rs`.
+- **Change the models** — replace a source in `models/` and run
+  `gen_models.py`, or hand-edit `model_data.rs`. The rotation order is the
+  `MODELS` array in `scene.rs`.
 - **Adjust vertical placement** — `MODEL_V_BIAS` in `src/tui.rs`.
 - **Add a palette** — add a `const fn` beside `Palette::green` / `Palette::grey`
   and select it in `main.rs`.
+- **Tune contrast** — `Palette::CONTRAST` in `src/canvas.rs` (the minimum
+  luminance distance a shade must keep from the background).
 - **Add model sizes** — extend `MODEL_BREAKPOINTS`.
 - **Wire in the real hack** — implement `Hack` and swap the two construction
   sites in `main.rs`, as described in the README.

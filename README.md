@@ -27,6 +27,16 @@ The cracktro draws **foreground glyphs only** — it never paints a background,
 so it works on any terminal, any theme, and any font without assuming or
 overriding the terminal's own colors.
 
+Because it is foreground-only, a glyph drawn in a color that matches the
+terminal's background would vanish. On startup the program asks the terminal
+for its actual background color (OSC 11 query) and remaps any of the 4 shades
+that would be invisible against it to the nearest visible one
+(`canvas.rs::Palette::remap_for`). This handles mid-tone backgrounds (e.g. a
+grey theme) that a simple dark/light split gets wrong. `--dark`/`--light`
+force the assumption instead of querying; if the terminal doesn't answer, it
+falls back to a set of shades that is visible on both a black and a white
+background.
+
 ## Run
 
 ```sh
@@ -39,15 +49,14 @@ The UI resizes live with the terminal (btop-style) — drag the window and it
 reflows, keeping the 3D model centered between the title and the loader. The
 bar fills over ~12 s (stub), then the screen freezes and blows away.
 
-Music plays by default; press `m` to mute/unmute. `./demo.sh` runs inside a
-`nix-shell -p mpv` when no audio player is installed, so the track still
-plays on NixOS.
+Music plays by default (embedded, via `rodio`); press `m` to mute/unmute.
 
 ### Flags
 
 | Flag | Effect |
 |------|--------|
 | `--grey` | Use the Grey Quarttrochrome palette (default: Green) |
+| `--dark` / `--light` | Force the terminal theme instead of auto-detecting |
 | `--music FILE` | Play a specific track (else auto-detect `music/`) |
 | `--no-music` | Start with music off |
 | `--dump N [W H]` | Headless: print N frames to stdout |
@@ -63,11 +72,13 @@ plays on NixOS.
 
 ## Music
 
-Drop a track in `music/` (mp3/ogg/flac/wav/m4a/opus). It auto-plays, looping,
-when you run the program — only inside the program, stopped cleanly on exit.
-The first audio file in `music/` (alphabetically) is used; `--music FILE`
-picks a specific one. Playback uses the first available player: `mpv` →
-`ffplay` → `paplay` → `aplay`. If none is installed it silently no-ops.
+Drop a track in `music/` (mp3/ogg/flac/wav/m4a/opus/aac). It auto-plays,
+looping, when you run the program — only inside the program, stopped cleanly
+on exit. The first audio file in `music/` (alphabetically) is used;
+`--music FILE` picks a specific one. Playback is in-process via `rodio`, so
+no external player (mpv/ffplay) is needed and the binary is fully
+self-contained. If no audio device is available it silently no-ops (the
+cracktro still runs).
 
 ## Preview GIF
 
@@ -165,8 +176,7 @@ Rules of the road:
     cc = "1"
     ```
 
-3. **Declare the ABI and implement `Hack`** in `src/hack.rs` (there is a
-   commented-out example at the bottom of that file you can uncomment):
+3. **Declare the ABI and implement `Hack`** in `src/hack.rs`:
 
     ```rust
     #[link(name = "hack")]
@@ -218,31 +228,36 @@ Use `--dump` to eyeball frames headlessly while wiring things up.
 
 - **Starfield**: warp effect — stars fly toward the viewer from center
   (`scene.rs::Starfield`). The brightest stars pop in the lightest shade.
-- **3D logo**: the FBR nano logo is an embedded OBJ model
-  (`src/model_data.rs`, generated from `fbrnanologo.obj` by `gen_model.py`),
-  rotated + perspective-projected, backface-culled, depth-sorted, flat-shaded.
-  It rasterizes to one brightness sample per cell, which the TUI draws as a
-  **dithered block** (`░▒▓█`): every covered cell gets at least `░`, so the
-  silhouette is always solid, and the character density carries the shading —
-  the four levels are spread over the model's real brightness range and
-  ordered-dithered (4x4 Bayer) so intermediate tones appear. Color is the mid
-  palette shade, brightening to the lightest for highlights. The projection
-  pre-compensates for the ~1:2 cell aspect, so the model stays square. It
-  auto-spins clockwise, a rare shimmer flashes it bright, and a slowly orbiting
-  light drives a specular **sheen** (Blinn-Phong in `scene.rs`). Spin:
-  `SPIN_SPEED` / `SPIN_DIR` in `scene.rs`.
-- **Centering**: the mesh is translated onto its own centroid before rotating,
-  so the logo spins about its middle and projects symmetrically. Horizontally
-  the layout centers it exactly; vertically it is placed deliberately **below**
+- **3D models**: three embedded meshes are cycled through in order — the FBR
+  nano logo, the v100, and the P5000 — swapping to the next one every half-turn
+  of the *auto* rotation. The user can grab the model with the mouse and spin it
+  freely; that user-driven rotation does not count toward the swap, so grabbing
+  it never interrupts the cycle. Each model is rotated + perspective-projected,
+  backface-culled, depth-sorted, and flat-shaded, then rasterized to one
+  brightness sample per cell, which the TUI draws as a **dithered block**
+  (`░▒▓█`): every covered cell gets at least `░`, so the silhouette is always
+  solid, and the character density carries the shading (ordered-dithered, 4x4
+  Bayer). Color is the mid palette shade, brightening to the lightest for
+  highlights. The projection pre-compensates for the ~1:2 cell aspect, so each
+  model stays square.
+- **Lighting**: a key light that slowly precesses around the model, a rim light
+  orbiting the other way, and a gently breathing ambient. The interplay of the
+  model's spin with the two moving lights keeps the shading in constant,
+  non-repeating motion — this is what reveals the detail in the simplified
+  meshes.
+- **Centering**: each mesh is translated onto its own centroid before rotating,
+  so it spins about its middle and projects symmetrically. Horizontally the
+  layout centers it exactly; vertically it is placed deliberately **below**
   centre by `MODEL_V_BIAS` in `tui.rs` (0.5 = dead centre, 1.0 = flush above the
   loader), because the lit top face draws the eye upward — raise the constant to
-  move the logo further down. Measured horizontal drift over a full spin is 0.5
-  cells, asserted by a unit test.
+  move the model further down.
 - **Mouse grab + flick**: click and drag the logo to rotate it; release to
   fling it with momentum. It damps back into the auto-spin. (crossterm mouse
   capture; pitch is clamped so it can't be flipped over.)
-- **Title**: chunky 4-row block glyphs (`BIG_FONT` in `tui.rs`) with a masked
-  drop shadow, shimmering through the palette.
+- **Title**: `CRACKED BY FBR ROM` sits centered in the top border, each
+  character color-cycled through the palette (the classic Game Boy shimmer).
+  The live terminal size is drawn top-left and the key hints right-aligned,
+  each only when it stays clear of the title.
 - **Loader**: the progress bar sits just above the scroller with a blank
   breathing row between them. It is shade 2 only, with a shade-1 **dithered
   shimmer** (`█▓▒`) that sweeps the whole bar in complete passes, Windows-7
@@ -255,7 +270,8 @@ Use `--dump` to eyeball frames headlessly while wiring things up.
 - **Responsive layout**: `tui::layout(w, h)` is a closed-form function of the
   terminal size and the single source of truth for every position (see its doc
   comment for the formulas). The model picks the largest size from a fixed
-  breakpoint table — `48x24, 40x20, 32x16, 24x12, 18x9, 14x7, 10x5` cells —
+  breakpoint table — `56x28, 48x24, 40x20, 32x16, 24x12, 18x9, 14x7, 10x5`
+  cells —
   that fits both the available width and the rows between the title and the
   loader, then is centered with `x = (w - mw) / 2`, `y = (h - mh) / 2` clamped
   into the region. Below the smallest breakpoint the model is omitted rather
@@ -270,8 +286,9 @@ Use `--dump` to eyeball frames headlessly while wiring things up.
   away — a gust sweeps left to right and every character falls off the
   bottom (`tui.rs::Celebration`), leaving a blinking "RAM UNLOCKED • DONE".
   The celebration runs ~3.5 s, then the program exits.
-- **Live resize**: btop-style — on `Resize`, the reflowed content is cleared
-  and the new frame is redrawn in the same write batch (no blank flash). The
-  layout is derived from the terminal size each frame, so it reflows.
+- **Live resize**: btop-style — the per-frame size poll (above) detects the
+  change and reflows the scene/cracktro, and ratatui's `draw` auto-resizes its
+  back-buffer to the same size and diffs it, writing only the changed cells.
+  So a resize reflows cleanly with no blank flash and no full-screen reprint.
 - **Greetings**: edit `GREETINGS` in `src/tui.rs` to change the bottom
   scroller text.
