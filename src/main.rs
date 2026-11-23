@@ -1,10 +1,11 @@
 //! FBR RAM Downloader — C64/Game Boy cracktro entry point.
 //!
-//! Runs the terminal cracktro: a warp starfield, a big 3D "FBR" title, a
-//! color-cycled 3D logo, a "DOWNLOADING RAM" bar, and a falling-letters
-//! celebration on completion. All in the 4-color FBR Game Boy palette.
-//! The hack is pluggable via the [`hack::Hack`] trait; today it's the
-//! simulated [`hack::StubHack`]. Resizes live with the terminal (btop-style).
+//! Runs the terminal cracktro: a warp starfield, a shimmering border title,
+//! three 3D models that cycle as they spin, a "DOWNLOADING RAM" bar, and a
+//! falling-letters celebration on completion. All in the 4-color FBR Game Boy
+//! palette. The hack is pluggable via the [`hack::Hack`] trait (swap it in
+//! [`make_hack`]); today it's the simulated [`hack::StubHack`]. Resizes live
+//! with the terminal (btop-style).
 //!
 //! Flags:
 //!   --dump N [W H]   headless: print N frames to stdout
@@ -107,6 +108,14 @@ fn parse_args() -> Args {
     args
 }
 
+/// The hack to run. This is the single integration point: swap the stub for
+/// the real C-backed implementation here (worked example in the README) and
+/// nothing else changes — the starfield, 3D model, loader, scroller and
+/// blow-away ending are all driven purely by `HackState`.
+fn make_hack() -> Box<dyn hack::Hack> {
+    Box::new(hack::StubHack::new())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
     let palette = if args.grey {
@@ -149,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (sw, sh) = scene_size(term_w, term_h);
     let mut scene = scene::Scene::new(sw, sh);
     let mut cracktro = tui::Cracktro::new(term_w, term_h, palette);
-    let mut hack: Box<dyn hack::Hack> = Box::new(hack::StubHack::new());
+    let mut hack = make_hack();
     hack.start()?;
 
     // Start music (unless disabled). No-op if no track/player found.
@@ -207,7 +216,7 @@ fn dump_frames(n: usize, w: usize, h: usize, palette: canvas::Palette) -> Result
     let (sw, sh) = scene_size(w, h);
     let mut scene = scene::Scene::new(sw, sh);
     let mut cracktro = tui::Cracktro::new(w, h, palette);
-    let mut hack: Box<dyn hack::Hack> = Box::new(hack::StubHack::new());
+    let mut hack = make_hack();
     hack.start()?;
     let dt = 0.033;
     for i in 0..n {

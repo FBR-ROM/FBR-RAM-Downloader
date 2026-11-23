@@ -213,11 +213,13 @@ Rules of the road:
     }
     ```
 
-4. **Swap it in** at the two places the stub is constructed (the interactive
-   loop and `--dump`), in `src/main.rs`:
+4. **Swap it in** in `make_hack()` in `src/main.rs` — the single integration
+   point used by both the interactive loop and `--dump`:
 
     ```rust
-    let mut hack: Box<dyn hack::Hack> = Box::new(hack::CHack);
+    fn make_hack() -> Box<dyn hack::Hack> {
+        Box::new(hack::CHack)
+    }
     ```
 
 That is the entire integration. The starfield, 3D model, loader, scroller and

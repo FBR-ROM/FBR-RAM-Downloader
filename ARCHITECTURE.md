@@ -400,8 +400,8 @@ why those flags exist.
 - **Tune contrast** — `Palette::CONTRAST` in `src/canvas.rs` (the minimum
   luminance distance a shade must keep from the background).
 - **Add model sizes** — extend `MODEL_BREAKPOINTS`.
-- **Wire in the real hack** — implement `Hack` and swap the two construction
-  sites in `main.rs`, as described in the README.
+- **Wire in the real hack** — implement `Hack` and swap it in `make_hack()` in
+  `src/main.rs` (the single integration point), as described in the README.
 
 After any layout change, run `cargo test` and sweep with `--layout` before
 committing.
