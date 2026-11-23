@@ -37,6 +37,56 @@ force the assumption instead of querying; if the terminal doesn't answer, it
 falls back to a set of shades that is visible on both a black and a white
 background.
 
+## Development with Nix
+
+The repo ships a [Nix flake](flake.nix) that provides both a development
+environment and an installable package, so the build is identical on every
+machine. It pins [nixpkgs](flake.lock) to a stable release and uses the
+committed `Cargo.lock` (exact crate versions + hashes), so builds are
+reproducible and the sandboxed build needs no network.
+
+### Development environment
+
+Enter the dev shell — it provides `rustc`, `cargo`, the audio system
+libraries (`alsa-lib`, `libpulseaudio`), `pkg-config`, and Python + Pillow
+(for the preview GIF):
+
+```sh
+nix develop            # or: nix develop .#x86_64-linux
+```
+
+Inside the shell:
+
+```sh
+cargo build --release   # build the binary
+cargo test              # run the unit tests
+./demo.sh               # run the cracktro (q to quit)
+```
+
+### Installable package
+
+The flake also builds the release binary as a Nix package:
+
+```sh
+nix build .             # -> result/bin/fbr-ram-downloader
+nix run .               # run it directly
+nix profile install .   # install into your nix profile
+```
+
+### Updating the toolchain
+
+Bump the `nixpkgs` tag in `flake.nix` (e.g. `nixos-25.11` → `nixos-26.05`)
+and re-lock:
+
+```sh
+nix flake update nixpkgs
+```
+
+> **No Nix?** The build needs a Rust toolchain plus the `alsa` and
+> `pulseaudio` development libraries (the audio stack, `rodio` → `cpal`,
+> links against them). The flake is the easiest way to get all of it; without
+> Nix, install those dev libraries and a Rust toolchain on your system.
+
 ## Run
 
 ```sh
@@ -84,16 +134,20 @@ cracktro still runs).
 
 ```sh
 ./demo.sh --dump 360 80 24 > /tmp/frames.txt
-nix-shell -p python3Packages.pillow --run "python3 make_gif.py /tmp/frames.txt 2 preview.gif"
+python3 make_gif.py /tmp/frames.txt 2 preview.gif
 ```
 
-Renders with **M+ Nerd Font Mono** (the "60" weight) and truecolor.
+Renders with **M+ Nerd Font Mono** (the "60" weight) and truecolor. (Run the
+second line inside the [Nix dev shell](#development-with-nix), which provides
+Python + Pillow.)
 
 ## Tests
 
 ```sh
-nix-shell -p rustc cargo --run "cargo test"
+nix develop --command cargo test
 ```
+
+(or `cargo test` inside the [Nix dev shell](#development-with-nix).)
 
 The layout and the logo's centering are unit-tested: the model never touches
 the border, always stays inside its region, clears the loader, is horizontally

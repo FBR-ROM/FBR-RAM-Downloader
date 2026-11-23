@@ -22,8 +22,13 @@ if [[ "$needs_build" == 1 ]]; then
   echo "building..." >&2
   if command -v cargo >/dev/null 2>&1; then
     cargo build --release
+  elif command -v nix >/dev/null 2>&1; then
+    # No system cargo: build inside the flake dev shell (provides rustc,
+    # cargo and the audio system libraries).
+    nix develop --command cargo build --release
   else
-    nix-shell -p rustc cargo --run "cargo build --release"
+    echo "error: no cargo or nix found; install a Rust toolchain (see README)" >&2
+    exit 1
   fi
 fi
 

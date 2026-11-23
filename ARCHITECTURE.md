@@ -49,6 +49,7 @@ These are not preferences; they are the rules the whole design falls out of.
 | `gen_models.py` | ~165 | Regenerates `model_data.rs` from the three sources in `models/` (weld, decimate, normalize) |
 | `make_gif.py` | ~106 | Renders dumped ANSI frames to an animated GIF (for previews) |
 | `demo.sh` | ~31 | One-command build + run |
+| `flake.nix` / `flake.lock` | ~110 | Nix flake: dev shell (`nix develop`) and installable release package (`nix build .` / `nix run .`) |
 
 Dependency direction is one-way and shallow:
 
@@ -196,8 +197,10 @@ shade. Mouse input can grab the model: dragging rotates it, releasing flings it
 with momentum (`DAMP = 1.7`), and auto-spin resumes below `RESUME = 0.12`.
 
 **Starfield.** 140 stars with a depth `z`; `z` decreases each frame and stars
-wrap when they pass the camera, so they appear to fly outward from the centre.
-Aspect-corrected, with `*`/`+`/`.` glyphs by brightness.
+respawn at a fresh random point in the unit square when they pass the camera,
+so they appear to fly outward from the centre. The projection is a symmetric
+warp (the same focal length on both axes, so the field of view is square and
+stars radiate evenly from the centre), with `*`/`+`/`.` glyphs by brightness.
 
 ## 7. The responsive layout (`tui::layout`)
 
@@ -332,10 +335,19 @@ The stream and sink are dropped on exit, so music never outlives the program.
   M+ Nerd Font Mono into an animated GIF, used for the repo preview.
 - `gen_models.py` regenerates `model_data.rs` from the three sources in
   `models/` (weld, decimate, normalize).
+- `flake.nix` provides the build environment: a dev shell (`nix develop`)
+  with `rustc`, `cargo`, the audio system libraries (`alsa-lib`,
+  `libpulseaudio`), `pkg-config` and Python + Pillow, plus an installable
+  release package (`nix build .` / `nix run .` / `nix profile install .`).
+  The package build uses the committed `Cargo.lock` (exact crate versions +
+  hashes) and fetches the crates in the non-sandboxed fetch phase, so the
+  sandboxed build needs no network. `models/` and `music/` are runtime-only
+  (the meshes are baked into `model_data.rs`), so the source hash excludes
+  them along with `target/`.
 
 ## 14. Testing and verification
 
-Eight unit tests run with `cargo test`, in `tui.rs`, `scene.rs` and `canvas.rs`:
+Nine unit tests run with `cargo test`, in `tui.rs`, `scene.rs` and `canvas.rs`:
 
 - the model never touches the border;
 - the model always stays inside its region;
@@ -345,6 +357,10 @@ Eight unit tests run with `cargo test`, in `tui.rs`, `scene.rs` and `canvas.rs`:
 - the model clears the loader;
 - the drawn model stays within 3 cells of its frame centre over a full spin
   across all three models (the flat badges drift more as they turn edge-on);
+- the starfield's respawning stars do not collapse onto a single point
+  (regression: the old respawn formula was a contraction with a fixed point
+  at −1, so after one respawn every star sat at (−1, −1) and the whole field
+  degenerated into a single diagonal);
 - the background-contrast remap keeps every palette shade visible against a
   sweep of backgrounds (both palettes), including the mid-tones a naive
   dark/light split gets wrong;

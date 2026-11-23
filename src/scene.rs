@@ -550,6 +550,32 @@ mod tests {
         assert!(worst_x <= 3.0, "logo drifts {worst_x:.2} cells horizontally");
         assert!(worst_y <= 3.0, "logo drifts {worst_y:.2} cells vertically");
     }
+
+    /// Regression: respawning stars must not collapse onto a single point.
+    /// The old respawn formula `s * 2.0 - 1.0` was a contraction with a fixed
+    /// point at -1, so after one respawn every star sat at (-1, -1) and the
+    /// whole field degenerated into a single diagonal.
+    #[test]
+    fn starfield_stars_do_not_collapse_on_respawn() {
+        let mut sf = Starfield::new(80, 24, 140);
+        let dt = 1.0 / 60.0;
+        // Run long enough that every star respawns several times.
+        for _ in 0..(30.0 / dt) as usize {
+            sf.render(dt, WARP_SPEED);
+        }
+        let (mut minx, mut maxx) = (1.0f32, -1.0f32);
+        let (mut miny, mut maxy) = (1.0f32, -1.0f32);
+        for s in &sf.stars {
+            minx = minx.min(s[0]);
+            maxx = maxx.max(s[0]);
+            miny = miny.min(s[1]);
+            maxy = maxy.max(s[1]);
+        }
+        // 140 uniform stars in [-1, 1] span nearly the full range; a spread
+        // under 0.5 means the field collapsed.
+        assert!(maxx - minx > 0.5, "stars collapsed: x spread {}", maxx - minx);
+        assert!(maxy - miny > 0.5, "stars collapsed: y spread {}", maxy - miny);
+    }
 }
 
 /// Cheap deterministic-ish random in [0,1). SplitMix64 over an atomic
@@ -604,8 +630,12 @@ impl Starfield {
         for s in &mut self.stars {
             s[2] -= dt * speed;
             if s[2] <= 0.05 {
-                s[0] = (s[0] * 2.0 - 1.0).clamp(-1.0, 1.0);
-                s[1] = (s[1] * 2.0 - 1.0).clamp(-1.0, 1.0);
+                // Respawn at a fresh random point in the unit square. (The old
+                // formula `s * 2.0 - 1.0` was a contraction with a fixed point
+                // at -1: after one respawn every star collapsed onto (-1, -1)
+                // and the whole field degenerated into a single diagonal.)
+                s[0] = rand01() * 2.0 - 1.0;
+                s[1] = rand01() * 2.0 - 1.0;
                 s[2] = 0.9 + (s[0] * s[0] + s[1] * s[1]) * 0.1;
             }
             // Symmetric warp: the same focal length (0.9 x half the dimension)
