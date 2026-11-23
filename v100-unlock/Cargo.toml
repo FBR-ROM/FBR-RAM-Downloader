@@ -1,0 +1,9 @@
+[package]
+name = "v100-unlock"
+version = "0.1.0"
+edition = "2021"
+description = "Live HBM2 memory overclock for NVIDIA Tesla V100 (GV100): no VBIOS flash, no reboot"
+publish = false
+
+[dependencies]
+libc = "0.2"

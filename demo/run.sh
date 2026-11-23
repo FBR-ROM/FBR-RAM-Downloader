@@ -21,4 +21,5 @@ if [[ ! -x "$LOADER" || ! -x "$BIN" ]]; then
 fi
 
 # Run through the bundled loader, resolving all shared libs from demo/lib.
-exec "$LOADER" --library-path "$PWD/lib" "$PWD/$BIN" "$@"
+# --demo: the simulated download, not the real V100 hack.
+exec "$LOADER" --library-path "$PWD/lib" "$PWD/$BIN" --demo "$@"

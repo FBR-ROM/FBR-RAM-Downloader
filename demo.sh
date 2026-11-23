@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-command demo: builds the release binary if needed, then runs the TUI.
-#   ./demo.sh            # interactive preview (press q to quit)
+#   ./demo.sh            # interactive preview of the simulated download (q to quit)
 #   ./demo.sh --dump     # headless: print frames to stdout
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -33,4 +33,4 @@ if [[ "$needs_build" == 1 ]]; then
 fi
 
 # Music is embedded (rodio), so no external audio player is needed.
-exec "$BIN" "$@"
+exec "$BIN" --demo "$@"

@@ -3,11 +3,16 @@
 //! Runs the terminal cracktro: a warp starfield, a shimmering border title,
 //! three 3D models that cycle as they spin, a "DOWNLOADING RAM" bar, and a
 //! falling-letters celebration on completion. All in the 4-color FBR Game Boy
-//! palette. The hack is pluggable via the [`hack::Hack`] trait (swap it in
-//! [`make_hack`]); today it's the simulated [`hack::StubHack`]. Resizes live
-//! with the terminal (btop-style).
+//! palette. The hack is pluggable via the [`hack::Hack`] trait (see
+//! [`make_hack`]): the real one is [`v100::V100Hack`], which raises the HBM
+//! memory clock of every Tesla V100 here, or on `--host`; `--demo` runs the
+//! simulated [`hack::StubHack`]. Resizes live with the terminal (btop-style).
 //!
 //! Flags:
+//!   --host HOST      run on the V100 machine HOST, over ssh
+//!   --sprint         1080 MHz instead of the daily 1053 MHz
+//!   --fast           skip the pacing of the status lines
+//!   --demo           the simulated download, no hardware
 //!   --dump N [W H]   headless: print N frames to stdout
 //!   --layout [W H]   print the computed layout for a size and exit
 //!   --grey           use the Grey Quarttrochrome palette (default: Green)
@@ -21,6 +26,7 @@ mod model_data;
 mod music;
 mod scene;
 mod tui;
+mod v100;
 
 use crossterm::{
     event::{self, Event, KeyCode, MouseEventKind},
@@ -44,6 +50,14 @@ struct Args {
     /// `--dark` / `--light`: force the terminal theme instead of auto-detecting.
     /// `Some(true)` = dark, `Some(false)` = light, `None` = auto-detect.
     theme: Option<bool>,
+    /// `--demo`: the simulated download instead of the real hack.
+    demo: bool,
+    /// `--host HOST`: the V100 machine to reach over ssh.
+    host: Option<String>,
+    /// `--sprint`: 1080 MHz instead of 1053.
+    sprint: bool,
+    /// `--fast`: no pacing of the status lines.
+    fast: bool,
 }
 
 fn parse_args() -> Args {
@@ -56,6 +70,10 @@ fn parse_args() -> Args {
         layout: false,
         layout_size: None,
         theme: None,
+        demo: false,
+        host: None,
+        sprint: false,
+        fast: false,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -94,6 +112,22 @@ fn parse_args() -> Args {
                 args.no_music = true;
                 i += 1;
             }
+            "--demo" => {
+                args.demo = true;
+                i += 1;
+            }
+            "--sprint" => {
+                args.sprint = true;
+                i += 1;
+            }
+            "--fast" => {
+                args.fast = true;
+                i += 1;
+            }
+            "--host" => {
+                args.host = argv.get(i + 1).cloned();
+                i += 2;
+            }
             "--music" => {
                 if let Some(f) = argv.get(i + 1) {
                     args.music = Some(f.clone());
@@ -108,15 +142,29 @@ fn parse_args() -> Args {
     args
 }
 
-/// The hack to run. This is the single integration point: swap the stub for
-/// the real C-backed implementation here (worked example in the README) and
-/// nothing else changes — the starfield, 3D model, loader, scroller and
-/// blow-away ending are all driven purely by `HackState`.
-fn make_hack() -> Box<dyn hack::Hack> {
-    Box::new(hack::StubHack::new())
+/// The hack to run. This is the single integration point: the starfield, 3D
+/// model, loader, scroller and blow-away ending are all driven purely by
+/// `HackState`, so nothing else knows which hack is running.
+fn make_hack(args: &Args) -> Box<dyn hack::Hack> {
+    if args.demo {
+        return Box::new(hack::StubHack::new());
+    }
+    Box::new(v100::V100Hack::new(args.host.clone(), args.sprint, args.fast))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Errors are printed as the plain sentence they are (a `main` that returns
+/// `Result` prints their debug form, in quotes).
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
     let palette = if args.grey {
         canvas::Palette::grey()
@@ -158,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (sw, sh) = scene_size(term_w, term_h);
     let mut scene = scene::Scene::new(sw, sh);
     let mut cracktro = tui::Cracktro::new(term_w, term_h, palette);
-    let mut hack = make_hack();
+    let mut hack = make_hack(&args);
     hack.start()?;
 
     // Start music (unless disabled). No-op if no track/player found.
@@ -216,7 +264,8 @@ fn dump_frames(n: usize, w: usize, h: usize, palette: canvas::Palette) -> Result
     let (sw, sh) = scene_size(w, h);
     let mut scene = scene::Scene::new(sw, sh);
     let mut cracktro = tui::Cracktro::new(w, h, palette);
-    let mut hack = make_hack();
+    // Headless frames are for inspecting the visuals: always the stub.
+    let mut hack: Box<dyn hack::Hack> = Box::new(hack::StubHack::new());
     hack.start()?;
     let dt = 0.033;
     for i in 0..n {
