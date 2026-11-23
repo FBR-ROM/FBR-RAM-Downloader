@@ -34,7 +34,9 @@ impl Music {
     }
 
     /// Resolve the track to play: explicit path, else the first audio file in
-    /// `music/`. Returns None if nothing is found.
+    /// `music/`. The `music/` dir is looked up relative to the current working
+    /// directory first (dev), then next to the binary (the self-contained
+    /// `demo/` bundle). Returns None if nothing is found.
     pub fn resolve(explicit: Option<&str>) -> Option<PathBuf> {
         if let Some(p) = explicit {
             let pb = PathBuf::from(p);
@@ -44,24 +46,28 @@ impl Music {
             eprintln!("music: file not found: {p}");
             return None;
         }
-        let dir = Path::new("music");
-        if !dir.is_dir() {
-            return None;
+        // Candidate music dirs: cwd first, then the binary's directory.
+        // `argv[0]` is the binary's path as invoked; `current_exe()` is a
+        // fallback, but it is NOT used first: when the binary is launched
+        // through a bundled glibc loader (demo/run.sh), `current_exe()`
+        // reports the *loader's* path, not the binary's.
+        let mut dirs = vec![PathBuf::from("music")];
+        let exe = std::env::args().next().map(PathBuf::from)
+            .or_else(|| std::env::current_exe().ok());
+        if let Some(exe) = exe {
+            if let Some(dir) = exe.parent() {
+                let d = dir.join("music");
+                if !dirs.contains(&d) {
+                    dirs.push(d);
+                }
+            }
         }
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_file()
-                    && p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| EXTS.iter().any(|x| x.eq_ignore_ascii_case(e)))
-                        .unwrap_or(false)
-            })
-            .collect();
-        entries.sort();
-        entries.into_iter().next()
+        for dir in dirs {
+            if let Some(track) = first_track_in(&dir) {
+                return Some(track);
+            }
+        }
+        None
     }
 
     /// Start playing `path` (looped) on the default audio device.
@@ -150,4 +156,25 @@ impl Drop for Music {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// The first audio file in `dir` (alphabetically), or None.
+fn first_track_in(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| EXTS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+                    .unwrap_or(false)
+        })
+        .collect();
+    entries.sort();
+    entries.into_iter().next()
 }

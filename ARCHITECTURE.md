@@ -45,10 +45,11 @@ These are not preferences; they are the rules the whole design falls out of.
 | `src/canvas.rs` | ~272 | The 4-colour palettes, quantization/shimmer helpers, the background-contrast remap, the cell grid, and ANSI serialization |
 | `src/model_data.rs` | ~8800 | Generated mesh data for the three models (do not edit by hand) |
 | `src/hack.rs` | ~87 | The `Hack` trait, `HackState`, and the simulated `StubHack` |
-| `src/music.rs` | ~153 | Optional looping background music (in-process via `rodio`), auto-detected and toggled at runtime |
+| `src/music.rs` | ~180 | Optional looping background music (in-process via `rodio`), auto-detected (cwd or next to the binary) and toggled at runtime |
 | `gen_models.py` | ~165 | Regenerates `model_data.rs` from the three sources in `models/` (weld, decimate, normalize) |
 | `make_gif.py` | ~106 | Renders dumped ANSI frames to an animated GIF (for previews) |
-| `demo.sh` | ~31 | One-command build + run |
+| `demo.sh` | ~31 | One-command build + run (dev) |
+| `demo/` | — | Self-contained bundle: release binary + bundled audio stack (`lib/`) + music (`music/`) + `run.sh` launcher; runs with no system deps |
 | `flake.nix` / `flake.lock` | ~110 | Nix flake: dev shell (`nix develop`) and installable release package (`nix build .` / `nix run .`) |
 
 Dependency direction is one-way and shallow:

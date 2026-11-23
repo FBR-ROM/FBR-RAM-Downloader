@@ -1,14 +1,30 @@
 # FBR RAM Downloader — Game Boy Cracktro
 
 A Game Boy DMG/MGB-styled cracktro for the FBR RAM-unlock hack: a warp
-starfield, a big 3D "FBR" title, a dither-shaded 3D spinning logo (the
-centerpiece), a "DOWNLOADING RAM" loader with a Windows-7-style shimmer, a
-straight color-cycled scroller, and a freeze-then-blow-away ending. The hack
-is pluggable — today it's a simulated stub so the UI can be developed and
-demoed standalone.
+starfield, a shimmering border title, three 3D models that cycle as they spin
+(the FBR nano logo, the v100, and the P5000), a "DOWNLOADING RAM" loader with a
+Windows-7-style shimmer, a straight color-cycled scroller, and a
+freeze-then-blow-away ending. The hack is pluggable — today it's a simulated
+stub so the UI can be developed and demoed standalone.
 
 How it works, and why it is built this way, is documented in
 [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Quick demo (no build required)
+
+`demo/` is a self-contained bundle: the release binary, its entire audio stack
+(glibc + ALSA, in `demo/lib/`), and the music track (`demo/music/`). It runs on
+any x86-64 Linux machine with **no Rust, Nix, or system audio libraries** —
+the bundled glibc loader is invoked directly, so everything resolves from
+`demo/lib/`.
+
+```sh
+./demo/run.sh            # interactive (press q to quit)
+./demo/run.sh --dump 60  # headless: print 60 frames to stdout
+```
+
+To rebuild the bundle after a code change, see "Rebuilding the demo bundle"
+below.
 
 ## Color
 
@@ -86,6 +102,23 @@ nix flake update nixpkgs
 > `pulseaudio` development libraries (the audio stack, `rodio` → `cpal`,
 > links against them). The flake is the easiest way to get all of it; without
 > Nix, install those dev libraries and a Rust toolchain on your system.
+
+### Rebuilding the demo bundle
+
+`demo/` is committed so the quick demo works without a build. After a code
+change, refresh it by rebuilding the release binary and copying it (plus the
+bundled libs and music) into `demo/`:
+
+```sh
+cargo build --release
+cp target/release/fbr-ram-downloader demo/
+```
+
+The shared libraries in `demo/lib/` (glibc loader, `libc`, `libm`, `libgcc_s`,
+`libasound`) only need refreshing if the toolchain or audio stack changes.
+`demo/run.sh` invokes the bundled loader with `--library-path demo/lib`, so the
+binary and its whole audio stack resolve from the bundle — no system
+dependencies.
 
 ## Run
 
