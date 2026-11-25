@@ -1,4 +1,4 @@
-# FBR RAM Downloader — Game Boy Cracktro
+# FBR RAM Downloader NVIDIA
 
 A Game Boy DMG/MGB-styled cracktro for the FBR RAM-unlock hack: a warp
 starfield, a shimmering border title, three 3D models that cycle as they spin
