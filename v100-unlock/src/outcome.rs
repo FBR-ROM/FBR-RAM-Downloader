@@ -10,13 +10,16 @@ pub enum Kind {
     RolledBack,
     /// A card may be at an unknown clock; power-cycle the host.
     Unknown,
+    /// A dry run: the cards were surveyed and reported, nothing was written.
+    Dry,
 }
 
 impl Kind {
     /// Process exit code: 0 at target, 2 untouched, 3 put back, 4 unknown.
+    /// A dry run exits 0: it did what it was told to do, which was nothing.
     pub fn exit_code(self) -> i32 {
         match self {
-            Kind::Done => 0,
+            Kind::Done | Kind::Dry => 0,
             Kind::Refused => 2,
             Kind::RolledBack => 3,
             Kind::Unknown => 4,
@@ -29,11 +32,12 @@ impl Kind {
             Kind::Refused => "refused",
             Kind::RolledBack => "rolled-back",
             Kind::Unknown => "unknown",
+            Kind::Dry => "dry",
         }
     }
 
     pub fn parse(word: &str) -> Option<Kind> {
-        [Kind::Done, Kind::Refused, Kind::RolledBack, Kind::Unknown]
+        [Kind::Done, Kind::Refused, Kind::RolledBack, Kind::Unknown, Kind::Dry]
             .into_iter()
             .find(|k| k.as_str() == word)
     }

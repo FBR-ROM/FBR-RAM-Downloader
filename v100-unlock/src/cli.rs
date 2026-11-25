@@ -16,10 +16,12 @@ options:
   --card BDF        only this card, e.g. 0000:08:00.0 (repeatable)
   --events          machine-readable progress; closing stdin cancels
   --simulate N      N simulated cards: no hardware, no root
+  --demo            a 4-card simulated run: no hardware, no root
+  --dry-run         survey and report, but write nothing
   -h, --help        this help
 
 Every selected card changes, or none does. The change is live and volatile:
-a reboot puts stock clocks back.
+a reboot puts stock clocks back. --dry-run changes nothing.
 
 exit status: 0 at target, 2 nothing changed, 3 put back,
              4 a card is in an unknown state (power-cycle the host)
@@ -42,6 +44,8 @@ pub struct Cli {
     pub cards: Vec<Bdf>,
     pub events: bool,
     pub simulate: Option<usize>,
+    /// Survey and report, but write nothing.
+    pub dry_run: bool,
 }
 
 pub fn parse(args: &[String]) -> Result<Cli, String> {
@@ -59,6 +63,7 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         cards: Vec::new(),
         events: false,
         simulate: None,
+        dry_run: false,
     };
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -69,6 +74,10 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             "--card" => cli.cards.push(value(rest.next(), "--card")?.parse()?),
             "--events" => cli.events = true,
             "--simulate" => cli.simulate = Some(simulated(value(rest.next(), "--simulate")?)?),
+            // `--demo` is `--simulate 4`: the shape of the machine the hack
+            // was qualified on.
+            "--demo" => cli.simulate = Some(4),
+            "--dry-run" => cli.dry_run = true,
             "-h" | "--help" => cli.command = Command::Help,
             other => return Err(format!("unknown option {other:?}")),
         }

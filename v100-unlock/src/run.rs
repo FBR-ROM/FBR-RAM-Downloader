@@ -82,12 +82,14 @@ impl Io<'_> {
 }
 
 /// Take every unit to `goal`. Progress and the receipt go to `emit`;
-/// `cancelled` is checked between cards.
+/// `cancelled` is checked between cards. With `dry_run`, the cards are
+/// surveyed and reported but nothing is written.
 pub fn run<B: Bar0>(
     units: &[Unit<B>],
     goal: Goal,
     clock: &dyn Clock,
     cancelled: &dyn Fn() -> bool,
+    dry_run: bool,
     emit: &mut dyn FnMut(Line),
 ) -> Outcome {
     if units.is_empty() {
@@ -102,9 +104,12 @@ pub fn run<B: Bar0>(
     io.step(0.0, text::found(&cards));
     plan(units, goal, &mut io)
         .and_then(|plans| {
+            if dry_run {
+                return Ok(finish(units, &plans, &[], goal, true, &mut io));
+            }
             let touched = change(units, &plans, &mut io)?;
             let metered = verify(units, &plans, &touched, &mut io)?;
-            Ok(finish(units, &plans, &metered, goal, &mut io))
+            Ok(finish(units, &plans, &metered, goal, false, &mut io))
         })
         .unwrap_or_else(|outcome| outcome)
 }
@@ -277,26 +282,41 @@ fn roll_back<B: Bar0>(
     }
 }
 
-/// The receipt, one line per card, and the headline.
+/// The receipt, one line per card, and the headline. A dry run reports what
+/// would happen and ends `Dry`; nothing was written, so there is no
+/// volatility note.
 fn finish<B: Bar0>(
     units: &[Unit<B>],
     plans: &[Plan],
     metered: &[f64],
     goal: Goal,
+    dry: bool,
     io: &mut Io,
 ) -> Outcome {
-    for ((unit, plan), &mhz) in units.iter().zip(plans).zip(metered) {
-        io.note(if plan.changes() {
-            text::changed(&unit.card, plan.from, plan.to, mhz)
-        } else {
-            text::unchanged(&unit.card, plan.from, Some(mhz))
-        });
+    if dry {
+        for (unit, plan) in units.iter().zip(plans) {
+            io.note(text::would_change(&unit.card, plan.from, plan.to));
+        }
+    } else {
+        for ((unit, plan), &mhz) in units.iter().zip(plans).zip(metered) {
+            io.note(if plan.changes() {
+                text::changed(&unit.card, plan.from, plan.to, mhz)
+            } else {
+                text::unchanged(&unit.card, plan.from, Some(mhz))
+            });
+        }
     }
-    if goal != Goal::Stock {
+    if !dry && goal != Goal::Stock {
         io.note(text::VOLATILE.to_string());
     }
     let pairs: Vec<(Coeff, Coeff)> = plans.iter().map(|p| (p.from, p.to)).collect();
-    Outcome::new(Kind::Done, text::headline(&pairs, goal == Goal::Stock))
+    let kind = if dry { Kind::Dry } else { Kind::Done };
+    let summary = if dry {
+        text::dry_headline(&pairs, goal == Goal::Stock)
+    } else {
+        text::headline(&pairs, goal == Goal::Stock)
+    };
+    Outcome::new(kind, summary)
 }
 
 fn refuse(reason: String) -> Outcome {

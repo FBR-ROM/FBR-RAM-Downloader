@@ -68,6 +68,20 @@ pub fn changed(card: &Card, from: Coeff, to: Coeff, metered: f64) -> String {
     )
 }
 
+/// A dry-run receipt line: what would happen, without the metered part.
+pub fn would_change(card: &Card, from: Coeff, to: Coeff) -> String {
+    if from == to {
+        format!("{} · {:.1} MHz · unchanged", who(card), from.mhz())
+    } else {
+        format!(
+            "{} · {:.1} → {:.1} MHz · would change",
+            who(card),
+            from.mhz(),
+            to.mhz()
+        )
+    }
+}
+
 pub fn unchanged(card: &Card, at: Coeff, metered: Option<f64>) -> String {
     let line = format!("{} · {:.1} MHz · unchanged", who(card), at.mhz());
     match metered {
@@ -108,6 +122,31 @@ pub fn headline(pairs: &[(Coeff, Coeff)], to_stock: bool) -> String {
         }
     };
     format!("{what} · {}{tail}", cards(changed.len()))
+}
+
+/// The one-line result of a dry run, e.g.
+/// `dry run: hbm 877.5 → 1053.0 MHz (+20%) · 4 cards · nothing written`.
+/// Mirrors [`headline`], but says what would happen and that nothing was
+/// written.
+pub fn dry_headline(pairs: &[(Coeff, Coeff)], to_stock: bool) -> String {
+    let changed: Vec<(Coeff, Coeff)> = pairs.iter().copied().filter(|(a, b)| a != b).collect();
+    if changed.is_empty() {
+        // `already` already carries the card count.
+        return format!("dry run: {} · nothing written", already(pairs));
+    }
+    let &(from, to) = changed.first().unwrap();
+    let same_from = changed.iter().all(|&(f, _)| f == from);
+    let same_to = changed.iter().all(|&(_, t)| t == to);
+    let what = match (same_from, same_to, to_stock) {
+        (_, false, _) => "hbm at target".to_string(),
+        (_, true, true) => format!("hbm back to {:.1} MHz", to.mhz()),
+        (false, true, false) => format!("hbm at {:.1} MHz", to.mhz()),
+        (true, true, false) => {
+            let pct = (to.mhz() / from.mhz() - 1.0) * 100.0;
+            format!("hbm {:.1} → {:.1} MHz ({pct:+.0}%)", from.mhz(), to.mhz())
+        }
+    };
+    format!("dry run: {what} · {} · nothing written", cards(changed.len()))
 }
 
 fn already(pairs: &[(Coeff, Coeff)]) -> String {

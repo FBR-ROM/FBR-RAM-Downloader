@@ -1,8 +1,8 @@
 # Architecture
 
 How the FBR RAM Downloader cracktro is put together, and why it is built the
-way it is. For usage see [README.md](README.md); for the plug-in interface see
-[Plugging in the real hack](README.md#plugging-in-the-real-hack).
+way it is. For usage see [README.md](README.md); the plug-in interface is
+[section 10](#10-the-pluggable-hack).
 
 ## 1. What this is
 
@@ -39,13 +39,15 @@ These are not preferences; they are the rules the whole design falls out of.
 
 | File | Lines | Responsibility |
 |------|-------|----------------|
-| `src/main.rs` | ~447 | Entry point, argument parsing, the event loop, live resize, headless `--dump`, `--layout` probe, background-color detection, terminal setup/teardown |
-| `src/tui.rs` | ~703 | The cracktro itself: layout, screen elements, the loader, the scroller, the ending, and the layout tests |
-| `src/scene.rs` | ~592 | 3D pipeline (model transform, projection, culling, painter's algorithm, rasterization, dynamic lighting, model cycling) plus the warp starfield |
-| `src/canvas.rs` | ~272 | The 4-colour palettes, quantization/shimmer helpers, the background-contrast remap, the cell grid, and ANSI serialization |
+| `src/main.rs` | ~521 | Entry point, argument parsing, the event loop, live resize, headless `--dump`, `--layout` probe, background-color detection, terminal setup/teardown |
+| `src/tui.rs` | ~714 | The cracktro itself: layout, screen elements, the loader, the scroller, the ending, and the layout tests |
+| `src/scene.rs` | ~658 | 3D pipeline (model transform, projection, culling, painter's algorithm, rasterization, dynamic lighting, model cycling) plus the warp starfield |
+| `src/canvas.rs` | ~293 | The 4-colour palettes, quantization/shimmer helpers, the background-contrast remap, the cell grid, and ANSI serialization |
 | `src/model_data.rs` | ~8800 | Generated mesh data for the three models (do not edit by hand) |
-| `src/hack.rs` | ~87 | The `Hack` trait, `HackState`, and the simulated `StubHack` |
+| `src/hack.rs` | ~91 | The `Hack` trait, `HackState`, and the simulated `StubHack` |
+| `src/v100.rs` | ~440 | The real hack: runs `v100-unlock apply --events` as root (here or over ssh), paces its lines into the cracktro, and puts the cards back on any exit |
 | `src/music.rs` | ~180 | Optional looping background music (in-process via `rodio`), auto-detected (cwd or next to the binary) and toggled at runtime |
+| `v100-unlock/` | ~2400 | The root tool: survey / change / measure the HBM clock, all-or-nothing, with a simulator and a large test suite (see its `tests/`) |
 | `gen_models.py` | ~165 | Regenerates `model_data.rs` from the three sources in `models/` (weld, decimate, normalize) |
 | `make_gif.py` | ~106 | Renders dumped ANSI frames to an animated GIF (for previews) |
 | `demo.sh` | ~31 | One-command build + run (dev) |
@@ -59,11 +61,14 @@ main.rs ──> tui.rs ──> canvas.rs
    │          │
    │          └─────> scene.rs ──> model_data.rs
    ├──> hack.rs
+   ├──> v100.rs ──> v100-unlock (the root tool, a workspace member)
    └──> music.rs
 ```
 
 `scene.rs` knows nothing about the terminal; it produces brightness samples.
 `tui.rs` owns every pixel decision. `canvas.rs` owns colour and ANSI.
+`v100.rs` is the only cracktro file that knows the real hack exists: it spawns
+`v100-unlock` and translates its `--events` lines into `HackState`.
 
 ## 4. Per-frame data flow
 
@@ -282,20 +287,126 @@ until the program exits.
 
 ## 10. The pluggable hack
 
+The cracktro is only the *presentation layer*. Everything it displays comes
+from one small interface, [`Hack`](src/hack.rs), so the whole UI is decoupled
+from the real RAM-unlock work.
+
 ```rust
 pub trait Hack {
     fn start(&mut self) -> Result<(), String>;  // once, before the loop
     fn poll(&mut self) -> HackState;            // once per frame, non-blocking
     fn finish(&mut self) -> Result<(), String>; // once, on any exit
 }
+
+pub struct HackState {
+    pub progress: f32,          // 0.0 ..= 1.0  -> the loader bar and percentage
+    pub status: String,         // status line, e.g. "mapping pages"
+    pub done: bool,             // true once finished -> freeze + blow-away ending
+    pub error: Option<String>,  // Some(..) -> shown, then the program exits with it
+    pub done_message: Option<String>, // completion line; None keeps "RAM UNLOCKED • DONE"
+}
 ```
 
-`HackState` carries `progress` (0..=1), a `status` string, `done`, and an
-optional `error`. Nothing else in the UI knows what the hack does: `progress`
-drives the bar, `done` triggers the celebration and the exit, and `error` is
-shown before exiting. `StubHack` simulates a 12-second download so the visuals
-can be developed standalone. The README has a worked example of binding a C
-implementation.
+Nothing else in the UI knows what the hack does: `progress` drives the bar,
+`done` triggers the celebration and the exit, `error` is shown before exiting,
+and `done_message` (when set) is the line left blinking after the blow-away —
+so a dry run ends on "dry run: … · nothing written" instead of "RAM UNLOCKED".
+
+Two implementations are wired in, selected in `make_hack()` in `src/main.rs`
+(the single integration point used by both the interactive loop and `--dump`):
+
+- [`V100Hack`](src/v100.rs) — the real one. Runs `v100-unlock apply --events`
+  as root, on this machine or on `--host` over ssh, and paces its lines into
+  the cracktro. `--dry-run` passes through to the agent.
+- [`StubHack`](src/hack.rs) — the simulated 12-second download, used by
+  `--demo` so the visuals can be developed and demoed anywhere.
+
+Rules of the road for any `Hack`:
+
+- `poll` is called about 30x/second and **must not block**. Kick off work in
+  `start` (or a background thread) and have `poll` only read the latest
+  snapshot. The frame loop drives the animation; a blocking `poll` stutters it.
+- `progress` is the only thing that moves the bar; `done` is the only thing
+  that triggers the celebration and the exit. Nothing else in the UI changes.
+- `finish` is always called, even on `q`/quit or error, so it is the place to
+  stop threads, free buffers, or unlock anything you locked.
+
+### Worked example: a C-backed hack
+
+To add a hack that is not `v100-unlock`, expose a tiny C ABI and implement
+`Hack` around it:
+
+1. **Put the C source in the repo**, e.g. `src/hack.c`:
+
+    ```c
+    #include <string.h>
+    static float g_progress; static int g_done;
+    int  hack_start(void) { g_progress = 0.0f; g_done = 0; /* ... */ return 0; }
+    float hack_progress(void) { return g_progress; }   /* 0..1 */
+    int  hack_done(void) { return g_done; }
+    int  hack_finish(void) { /* tear down */ return 0; }
+    void hack_status(char *buf, size_t len) { snprintf(buf, len, "mapping pages"); }
+    ```
+
+    For a long-running job, have `hack_start` spawn a thread that updates
+    `g_progress`/`g_done` and returns immediately.
+
+2. **Compile and link it** with a `build.rs` (add `cc` as a build-dependency in
+   `Cargo.toml`):
+
+    ```rust
+    // build.rs
+    fn main() { cc::Build::new().file("src/hack.c").compile("hack"); }
+    ```
+
+    ```toml
+    [build-dependencies]
+    cc = "1"
+    ```
+
+3. **Declare the ABI and implement `Hack`** in `src/hack.rs`:
+
+    ```rust
+    #[link(name = "hack")]
+    extern "C" {
+        fn hack_start() -> i32;
+        fn hack_progress() -> f32;
+        fn hack_status(buf: *mut u8, len: usize);
+        fn hack_done() -> i32;
+        fn hack_finish() -> i32;
+    }
+
+    pub struct CHack;
+
+    impl Hack for CHack {
+        fn start(&mut self) -> Result<(), String> {
+            if unsafe { hack_start() } == 0 { Ok(()) } else { Err("start failed".into()) }
+        }
+        fn poll(&mut self) -> HackState {
+            let mut buf = [0u8; 128];
+            unsafe { hack_status(buf.as_mut_ptr(), buf.len()) };
+            let status = String::from_utf8_lossy(&buf)
+                .split('\0').next().unwrap_or("").to_string();
+            HackState {
+                progress: unsafe { hack_progress() }.clamp(0.0, 1.0),
+                status,
+                done: unsafe { hack_done() } != 0,
+                error: None,
+                done_message: None,
+            }
+        }
+        fn finish(&mut self) -> Result<(), String> {
+            unsafe { hack_finish() };
+            Ok(())
+        }
+    }
+    ```
+
+4. **Swap it in** in `make_hack()` in `src/main.rs`.
+
+That is the entire integration. The starfield, 3D model, loader, scroller and
+blow-away ending are driven purely by `HackState`, so they need no changes.
+Use `--dump` to eyeball frames headlessly while wiring things up.
 
 ## 11. Music
 
@@ -348,7 +459,8 @@ The stream and sink are dropped on exit, so music never outlives the program.
 
 ## 14. Testing and verification
 
-Nine unit tests run with `cargo test`, in `tui.rs`, `scene.rs` and `canvas.rs`:
+The cracktro's unit tests run with `cargo test`, in `tui.rs`, `scene.rs`,
+`canvas.rs` and `v100.rs`:
 
 - the model never touches the border;
 - the model always stays inside its region;
@@ -367,6 +479,26 @@ Nine unit tests run with `cargo test`, in `tui.rs`, `scene.rs` and `canvas.rs`:
   dark/light split gets wrong;
 - a non-detected background falls back to shades visible on both black and
   white.
+
+`v100-unlock` carries its own, larger suite (`v100-unlock/tests/`), run with
+`cargo test -p v100-unlock`. It drives the real run logic against a
+register-level simulator of the GV100, so the hardware invariants are checked
+without a card:
+
+- **all-or-nothing** — one card failing, a wrong metered clock, or a cancel
+  mid-run puts every card back; a hung card is the only state that is not
+  recoverable, and it is named as such;
+- **the write-only window is never read** — `0x98BC98` and its multicast
+  window are refused for reads, and a misaligned or out-of-range offset is
+  refused;
+- **cancellation** — SIGINT, SIGTERM, SIGHUP (a dropped ssh session) and a
+  closed stdin each put every card back, even when the reader is gone;
+- **the protocol** — every `--events` line round-trips, control characters
+  cannot drive the terminal, and each outcome maps to the state the hardware
+  is left in;
+- **a chaos soak** — thousands of seeded random runs (1–16 cards of any V100
+  model, any starting clock, random faults and random cancellation) asserting
+  that whatever happens, the hardware ends up exactly where the outcome says.
 
 Beyond the unit tests, two sweep scripts were used during development (kept out
 of the repo): a 224-size layout sweep asserting containment and placement, and a
@@ -417,8 +549,9 @@ why those flags exist.
 - **Tune contrast** — `Palette::CONTRAST` in `src/canvas.rs` (the minimum
   luminance distance a shade must keep from the background).
 - **Add model sizes** — extend `MODEL_BREAKPOINTS`.
-- **Wire in the real hack** — implement `Hack` and swap it in `make_hack()` in
-  `src/main.rs` (the single integration point), as described in the README.
+- **Wire in a new hack** — implement `Hack` and swap it in `make_hack()` in
+  `src/main.rs` (the single integration point), as in
+  [section 10](#10-the-pluggable-hack).
 
 After any layout change, run `cargo test` and sweep with `--layout` before
 committing.

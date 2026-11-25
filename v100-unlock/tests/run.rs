@@ -266,3 +266,51 @@ fn cards_from_different_clocks_are_summarised_by_where_they_end() {
     let (up, _) = Rig::new(&[(V100, 65, OK), (V100, 80, OK)]).go(Goal::Daily, &never);
     assert_eq!(up.summary, "hbm at 1053.0 MHz · 2 cards");
 }
+
+#[test]
+fn a_dry_run_writes_nothing_and_says_so() {
+    let rig = Rig::v100s(4);
+    let (outcome, lines) = rig.go_dry(Goal::Daily, &never, true);
+    assert_eq!(outcome.kind, Kind::Dry, "{}", outcome.summary);
+    assert_eq!(outcome.summary, "dry run: hbm 877.5 → 1053.0 MHz (+20%) · 4 cards · nothing written");
+    assert_eq!(rig.write_count(), 0, "a dry run never writes");
+    assert_eq!(rig.ndivs(), vec![65; 4], "the cards are still at stock");
+    // The receipt says what would happen, and there is no volatility note.
+    let notes = notes(&lines);
+    assert!(
+        notes[0].ends_with("877.5 → 1053.0 MHz · would change"),
+        "{notes:?}"
+    );
+    assert!(
+        !notes.iter().any(|n| n.contains("reboot")),
+        "no volatility note: nothing was written"
+    );
+}
+
+#[test]
+fn a_dry_run_of_a_card_already_at_target_says_unchanged() {
+    let rig = Rig::new(&[(V100, 78, OK)]);
+    let (outcome, lines) = rig.go_dry(Goal::Daily, &never, true);
+    assert_eq!(outcome.kind, Kind::Dry, "{}", outcome.summary);
+    assert_eq!(outcome.summary, "dry run: already at 1053.0 MHz · 1 card · nothing written");
+    assert_eq!(rig.write_count(), 0);
+    let notes = notes(&lines);
+    assert!(notes[0].ends_with("1053.0 MHz · unchanged"), "{notes:?}");
+}
+
+#[test]
+fn a_dry_run_still_refuses_a_card_it_does_not_understand() {
+    let rig = Rig::new(&[(V100, 90, OK)]);
+    let (outcome, _) = rig.go_dry(Goal::Daily, &never, true);
+    assert_eq!(outcome.kind, Kind::Refused, "{}", outcome.summary);
+    assert_eq!(rig.write_count(), 0);
+}
+
+#[test]
+fn a_dry_run_of_restore_reports_the_way_down() {
+    let rig = Rig::new(&[(V100, 78, OK), (V100, 80, OK)]);
+    let (outcome, _) = rig.go_dry(Goal::Stock, &never, true);
+    assert_eq!(outcome.kind, Kind::Dry, "{}", outcome.summary);
+    assert_eq!(outcome.summary, "dry run: hbm back to 877.5 MHz · 2 cards · nothing written");
+    assert_eq!(rig.write_count(), 0);
+}

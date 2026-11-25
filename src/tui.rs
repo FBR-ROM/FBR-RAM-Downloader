@@ -48,7 +48,7 @@ const BAR_WIDTH: usize = 44;
 ///
 /// EDIT THIS to add your own text. It scrolls left on a loop; separate
 /// entries with "  \u{2022}  " (or anything you like). Keep it one line.
-pub const GREETINGS: &str = "  MUSIC: \"ARCANE MAGIC\"  \u{2022}  GREETINGS TO:  \u{2022}  THE FBR CREW  \u{2022}  ALL THE RAM HUNTERS  \u{2022}  STAY UNLOCKED  \u{2022}  ";
+pub const GREETINGS: &str = "  MUSIC: \"ARCANE MAGIC\"  \u{2022}  CREDITS:  \u{2022}  AMOGH MUNIKOTE  \u{2022}  ASM64 HOOLIGAN  \u{2022}  CACHENETICS  \u{2022}  DUGGASCO  \u{2022}  FBR ROM  \u{2022}  ALL THE RAM HUNTERS  \u{2022}  SHOUTOUTS:  \u{2022}  HELIX COLLECTIVE  \u{2022}  NOUS RESEARCH  \u{2022}  ETH STRAT  \u{2022}  AMP CODE  \u{2022}  JENSEN HUANG  \u{2022}  NVIDIA  \u{2022}  FRANCK (TP ART)  \u{2022}  ONSLAUGHT  \u{2022}  DEFAME  \u{2022}  GINA  \u{2022}  ZIGGY  \u{2022}  ROB  \u{2022}  GARY  \u{2022}  JEEVA  \u{2022}  DNV  \u{2022}  ";
 
 /// Model size breakpoints in cells, largest first: `(width, rows)`. Pixels are
 /// one per cell and cells are ~1:2, so a square model spans twice as many
@@ -347,6 +347,8 @@ struct Celebration {
     sw: usize,
     sh: usize,
     t: f32,
+    /// The message left blinking after the blow-away.
+    message: String,
 }
 
 impl Celebration {
@@ -357,8 +359,14 @@ impl Celebration {
     /// Rightward acceleration (cells/s^2) — the "blow away".
     const WIND: f32 = 6.0;
 
-    fn snapshot(cv: &Canvas) -> Self {
-        Celebration { cells: cv.cells.clone(), sw: cv.w, sh: cv.h, t: 0.0 }
+    fn snapshot(cv: &Canvas, message: String) -> Self {
+        Celebration {
+            cells: cv.cells.clone(),
+            sw: cv.w,
+            sh: cv.h,
+            t: 0.0,
+            message,
+        }
     }
 
     /// Seconds until even the last column has left the screen.
@@ -398,7 +406,7 @@ impl Celebration {
         // Once the screen has blown away, leave the message blinking.
         if t > self.clear_time() {
             let col = p.cycle_shade(1.0, t, 0.0);
-            cv.text_center_inner(h / 2, "RAM UNLOCKED \u{2022} DONE", col, true);
+            cv.text_center_inner(h / 2, &self.message, col, true);
         }
         cv
     }
@@ -478,7 +486,11 @@ impl Cracktro {
 
         // 6. On completion: freeze this complete frame, then blow it away.
         if state.done {
-            self.celebration = Some(Celebration::snapshot(&cv));
+            let message = state
+                .done_message
+                .clone()
+                .unwrap_or_else(|| "RAM UNLOCKED \u{2022} DONE".into());
+            self.celebration = Some(Celebration::snapshot(&cv, message));
             return self.celebration.as_mut().unwrap().render(0.0, p, w, h);
         }
 
@@ -575,7 +587,14 @@ impl Cracktro {
         let (status, status_col, status_bold) = if let Some(err) = &state.error {
             (err.as_str(), p.colors[0], true)
         } else if state.done {
-            ("RAM UNLOCKED \u{2022} DONE", p.cycle_shade(1.0, t, 0.0), true)
+            (
+                state
+                    .done_message
+                    .as_deref()
+                    .unwrap_or("RAM UNLOCKED \u{2022} DONE"),
+                p.cycle_shade(1.0, t, 0.0),
+                true,
+            )
         } else if lay.too_small {
             let msg = if inner_w >= 20 { "RESIZE FOR BEST FIT" } else { "RESIZE" };
             (msg, p.colors[0], true)

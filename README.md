@@ -1,73 +1,232 @@
 # FBR RAM Downloader NVIDIA
 
-A Game Boy DMG/MGB-styled cracktro for the FBR RAM-unlock hack: a warp
-starfield, a shimmering border title, three 3D models that cycle as they spin
-(the FBR nano logo, the v100, and the P5000), a "DOWNLOADING RAM" loader with a
-Windows-7-style shimmer, a straight color-cycled scroller, and a
-freeze-then-blow-away ending. The hack is pluggable. The real one raises the
-memory clock of NVIDIA Tesla V100 GPUs
-([below](#the-real-hack-v100-memory-overclock)); `--demo` runs a simulated
-download so the UI can be developed and demoed anywhere.
+A Game Boy DMG/MGB-styled cracktro that runs a real overclock: it raises the
+HBM2 memory clock of every NVIDIA Tesla V100 in a machine, live, with no VBIOS
+flash and no reboot. The cracktro is the presentation; the work is done by
+[`v100-unlock`](v100-unlock/), a small root tool in this repo. `--demo` runs a
+simulated download so the cracktro can be demoed anywhere.
 
-How it works, and why it is built this way, is documented in
-[ARCHITECTURE.md](ARCHITECTURE.md).
+How the cracktro is put together is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## Quick demo (no build required)
+## How it works
 
-`demo/` is a self-contained bundle: the release binary, its entire audio stack
-(glibc + ALSA, in `demo/lib/`), and the music track (`demo/music/`). It runs on
-any x86-64 Linux machine with **no Rust, Nix, or system audio libraries** —
-the bundled glibc loader is invoked directly, so everything resolves from
-`demo/lib/`.
+Overclocking is free performance. On a gaming card you raise the core clock,
+memory clock, voltage with sliders that talk to Nvidia's driver and tell it to
+set the card to whatever you specified. On the V100, Nvidia's datacenter chip,
+that door is deliberately shut: the driver exposes only one memory speed,
+877 MHz, versus the hundreds on gaming cards. Editing the card's firmware to go
+faster doesn't work either — the firmware is signed, and the card rejects
+anything without Nvidia's signature.
+
+Yet the same chip runs its memory at 1107 MHz in the V100S. Nvidia locked down
+overclocking on the V100 so they could sell you a more expensive, faster SKU
+that is just overclocked.
+
+Nvidia left a gap in that lock: the driver can only police requests that go
+through the driver. It does not stop you, the user, from writing straight into
+the registers and doing whatever you want with them, as long as you have admin
+rights on the machine.
+
+The memory clock on a V100 is a number in one of those registers: a 27 MHz
+reference clock multiplied by a setting. Nvidia's setting gives you 877.5 MHz.
+Change the setting and you change the clock. All it takes is one write to a
+multicast address, which hits all 16 of the card's memory controllers at once,
+and the memory switches over in about a ten-thousandth of a second — no reboot,
+no driver reload.
+
+We didn't come up with this in isolation. People found this vulnerability while
+unlocking Nvidia's crypto-mining cards, which Nvidia also deliberately
+crippled, and we ported the logic to the V100. The unlock kit for the CMP
+100–210 (literally a V100 with a different name) changes the memory clock by
+putting the memory to sleep, stopping the clocks, and restarting them; on our
+cards that crashed the card or the whole server 5 out of 7 times. The single
+write from 170tune (made for a different mining card) worked, because the
+multicast handled everything for us.
+
+From there we went up one step at a time, testing the memory for errors at every
+step, until 1107 MHz, where it started throwing errors straight away. We ended
+up at 1053 MHz: 20% more memory bandwidth for free. The driver doesn't even
+know — Nvidia's own tool will report the card running at 1053 MHz while still
+saying 877 MHz is the max.
+
+### It checks everything
+
+Writing straight into a chip's registers can go wrong, so the tool checks
+everything. After the change it counts the memory's actual clock ticks to make
+sure every card really is at the new speed (within 1 MHz). It is all-or-nothing:
+if one card is off, something fails, or you quit halfway, every card is put back
+to where it started. Nothing is permanent — no firmware is touched, and a
+reboot puts it back to stock.
+
+1053 MHz is what held up in our stability testing on these cards; `--sprint`
+takes it to 1080 if you want to push it. You can run it as a systemd unit so it
+starts on boot.
+
+Keep in mind this is faster memory, not more memory: your 16 (or 32) GB card is
+still 16 (or 32) GB. You'll see the speedup in work that is waiting on memory —
+running inference on LLMs — not in pure number crunching.
+
+We have tested this on P-series and V-series cards, not above. There is a chance
+it can work on A-series cards, or could be ported to; if you figure that out, a
+PR to expand the tool would be great.
+
+We are about to announce some more goodies for the non-hyperscale market of
+inference enjoyers, and this is our first gift back.
+
+Happy cracking.
+
+— FBR ROM
+
+## The numbers
+
+| | memory clock | memory bandwidth |
+|---|---:|---:|
+| stock | 877.5 MHz | 898 GB/s |
+| daily (default) | 1053 MHz | +20% |
+| `--sprint` | 1080 MHz | +23% |
+
+The change is volatile: a reboot, or `v100-unlock restore`, returns stock
+clocks. It is validated on 4× V100-SXM2-16GB; every Tesla V100 model is
+accepted, but 1053 MHz is untested on the others (the FHHL starts at 810 MHz,
+so for it the daily clock is +30%).
+
+## Running it
 
 ```sh
-./demo/run.sh            # interactive (press q to quit)
-./demo/run.sh --dump 60  # headless: print 60 frames to stdout
+fbr-ram-downloader --demo          # the simulated download (no hardware)
+fbr-ram-downloader                 # the real hack, on this machine
+fbr-ram-downloader --host c4130    # the real hack, on the V100 machine c4130, over ssh
+fbr-ram-downloader --dry-run       # survey and report, write nothing
+fbr-ram-downloader --sprint        # 1080 MHz instead of the daily 1053 MHz
 ```
 
-To rebuild the bundle after a code change, see "Rebuilding the demo bundle"
-below.
+`--dry-run` is the safe first step: it surveys every card and reports exactly
+what a run would do — `877.5 → 1053.0 MHz · would change` per card — and writes
+nothing. It opens the cards read-only and takes no lock.
 
-## Color
+The cracktro runs `v100-unlock apply --events` as root and shows its progress.
+Closing the agent's stdin cancels it, and it puts every card back — so quitting
+the cracktro, a crash, or a dropped connection can never leave a card
+half-changed. If the link just goes silent, the cracktro says so within about
+15 seconds; check the cards with `v100-unlock status`.
 
-Per the FBR brand rules (`FBR-DOCS/04 brand and design/Colour.md`), the design
-is dictated by the Game Boy DMG/MGB hardware: **exactly 4 colors, no more, no
-less.** Two quarttrochrome palettes:
+### Flags
 
-- **Green** (default): `#F1FFF8, #6AB68A, #034F42, #011923`
-- **Grey**: `#F5F5F7, #B2AFB8, #4A4B51, #000000`
+| Flag | Effect |
+|------|--------|
+| `--demo` | The simulated download: no hardware |
+| `--host HOST` | Run the real hack on the V100 machine `HOST`, over ssh |
+| `--dry-run` | Survey and report, but write nothing |
+| `--sprint` | 1080 MHz instead of the daily 1053 MHz |
+| `--fast` | Skip the pacing of the status lines |
+| `--grey` | Use the Grey Quarttrochrome palette (default: Green) |
+| `--dark` / `--light` | Force the terminal theme instead of auto-detecting |
+| `--music FILE` | Play a specific track (else auto-detect `music/`) |
+| `--no-music` | Start with music off |
+| `--dump N [W H]` | Headless: print N frames to stdout |
+| `--layout [W H]` | Print the computed layout for a size and exit (debug aid) |
 
-Every pixel on screen is one of the 4 exact colors (no interpolation). The
-"color cycling" is the classic Game Boy 4-shade shimmer — hard-stepping
-through the palette over time.
+### The `v100-unlock` tool, on its own
 
-The cracktro draws **foreground glyphs only** — it never paints a background,
-so it works on any terminal, any theme, and any font without assuming or
-overriding the terminal's own colors.
+On the V100 machine, the agent is a normal CLI:
 
-Because it is foreground-only, a glyph drawn in a color that matches the
-terminal's background would vanish. On startup the program asks the terminal
-for its actual background color (OSC 11 query) and remaps any of the 4 shades
-that would be invisible against it to the nearest visible one
-(`canvas.rs::Palette::remap_for`). This handles mid-tone backgrounds (e.g. a
-grey theme) that a simple dark/light split gets wrong. `--dark`/`--light`
-force the assumption instead of querying; if the terminal doesn't answer, it
-falls back to a set of shades that is visible on both a black and a white
-background.
+```sh
+v100-unlock status                # every card's clock, measured (read-only)
+v100-unlock apply                 # raise to 1053 MHz (+20%)
+v100-unlock apply --sprint        # raise to 1080 MHz (+23%)
+v100-unlock apply --dry-run       # survey and report, write nothing
+v100-unlock restore               # back to stock
+v100-unlock apply --demo          # a 4-card simulated run: no hardware, no root
+```
 
-## Development with Nix
+`--card BDF` selects a subset (repeatable); `--events` streams machine-readable
+progress (what the cracktro reads); `--simulate N` runs N simulated cards.
 
-The repo ships a [Nix flake](flake.nix) that provides both a development
-environment and an installable package, so the build is identical on every
-machine. It pins [nixpkgs](flake.lock) to a stable release and uses the
-committed `Cargo.lock` (exact crate versions + hashes), so builds are
-reproducible and the sandboxed build needs no network.
+## Installing
 
-### Development environment
+There are two artifacts, and they install differently:
 
-Enter the dev shell — it provides `rustc`, `cargo`, the audio system
-libraries (`alsa-lib`, `libpulseaudio`), `pkg-config`, and Python + Pillow
-(for the preview GIF):
+- **The V100 agent** (`v100-unlock`) — a **static** binary that runs as root on
+  the V100 machine. It has no system dependencies, so it runs on any Linux
+  distro. The V100 machine itself needs no Rust: build the binary anywhere and
+  copy it over.
+- **The cracktro** (`fbr-ram-downloader`) — the TUI. It needs a Rust toolchain
+  and the ALSA development library to build (the audio stack, `rodio` → `cpal`,
+  links against ALSA only — not PulseAudio).
+
+### The V100 agent (on the V100 machine, once)
+
+Build the static binary. The repo's `.cargo/config.toml` sets the musl target to
+link with `rust-lld` and `+crt-static`, so this one command produces a
+self-contained binary — no extra flags:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+cargo build -p v100-unlock --release --target x86_64-unknown-linux-musl
+```
+
+(`rustup` is the same on every distro; see the table below if you don't have
+it. A C compiler is needed for the build scripts — `gcc`/`clang` — but the
+result is static and needs none at runtime.)
+
+Copy it to the V100 machine, install it root-owned, and let your user run
+exactly that binary as root:
+
+```sh
+scp target/x86_64-unknown-linux-musl/release/v100-unlock c4130:
+ssh c4130
+sudo install -o root -g root -m 755 v100-unlock /usr/local/sbin/v100-unlock
+echo "$USER ALL=(root) NOPASSWD: /usr/local/sbin/v100-unlock" | sudo tee /etc/sudoers.d/v100-unlock
+sudo chmod 440 /etc/sudoers.d/v100-unlock
+```
+
+The cracktro calls `/usr/local/sbin/v100-unlock` by that exact path, and the
+sudoers rule names it, so the two have to agree.
+
+### The cracktro
+
+**With Nix (recommended).** The repo ships a [Nix flake](flake.nix) that builds
+the cracktro reproducibly — pinned [nixpkgs](flake.lock) and the committed
+`Cargo.lock` (exact crate versions + hashes) — so the build is identical on
+every machine and the sandboxed build needs no network:
+
+```sh
+nix build .             # -> result/bin/fbr-ram-downloader
+nix run .               # run it directly
+nix profile install .   # install into your nix profile
+```
+
+**Without Nix.** Install a Rust toolchain and the ALSA development library, then
+`cargo build --release`. The exact packages per distro:
+
+| Distro | Rust | ALSA dev | pkg-config |
+|--------|------|----------|------------|
+| Debian / Ubuntu | `sudo apt install rustc cargo` | `sudo apt install libasound2-dev` | `sudo apt install pkg-config` |
+| Fedora | `sudo dnf install rust cargo` | `sudo dnf install alsa-lib-devel` | `sudo dnf install pkgconf-pkg-config` |
+| Arch | `sudo pacman -S rust cargo` | `sudo pacman -S alsa-lib` | `sudo pacman -S pkgconf` |
+| openSUSE | `sudo zypper install rust cargo` | `sudo zypper install alsa-oss-devel` | `sudo zypper install pkgconf` |
+| Alpine | `sudo apk add rust cargo` | `sudo apk add alsa-lib-dev` | `sudo apk add pkgconf` |
+| NixOS | `nix develop` (the flake) | — | — |
+
+Or, the same on every distro, use [rustup](https://rustup.rs) for the toolchain
+and the distro's ALSA dev package from the table:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+# + the distro's ALSA dev package from the table above
+cargo build --release
+```
+
+The cracktro is a normal dynamically-linked binary; at runtime it needs the ALSA
+library present (it is, on any distro that ships a sound system). If there is no
+audio device it silently no-ops — the cracktro still runs.
+
+## Development
+
+The [Nix flake](flake.nix) is the dev path: one command gives a shell with
+`rustc`, `cargo`, the audio system libraries, `pkg-config`, and Python + Pillow
+(for the preview GIF), identical on every machine.
 
 ```sh
 nix develop            # or: nix develop .#x86_64-linux
@@ -76,40 +235,25 @@ nix develop            # or: nix develop .#x86_64-linux
 Inside the shell:
 
 ```sh
-cargo build --release   # build the binary
-cargo test              # run the unit tests
+cargo build --release   # build the cracktro
+cargo test --workspace  # run every test (cracktro + v100-unlock)
 ./demo.sh               # run the cracktro (q to quit)
 ```
 
-### Installable package
+`cargo test --workspace` runs the cracktro's unit tests and the full
+`v100-unlock` suite — the all-or-nothing invariants, the write-only register
+window, cancellation, the protocol, and a thousands-of-runs chaos soak against
+a register-level simulator of the GV100. That suite is the guarantee that the
+hardware is never left half-changed; see
+[ARCHITECTURE.md §14](ARCHITECTURE.md#14-testing-and-verification).
 
-The flake also builds the release binary as a Nix package:
-
-```sh
-nix build .             # -> result/bin/fbr-ram-downloader
-nix run .               # run it directly
-nix profile install .   # install into your nix profile
-```
-
-### Updating the toolchain
-
-Bump the `nixpkgs` tag in `flake.nix` (e.g. `nixos-25.11` → `nixos-26.05`)
-and re-lock:
-
-```sh
-nix flake update nixpkgs
-```
-
-> **No Nix?** The build needs a Rust toolchain plus the `alsa` and
-> `pulseaudio` development libraries (the audio stack, `rodio` → `cpal`,
-> links against them). The flake is the easiest way to get all of it; without
-> Nix, install those dev libraries and a Rust toolchain on your system.
+**No Nix?** The dev shell is just `rustc` + `cargo` + the ALSA dev library +
+`pkg-config` (the table above) plus Python 3 with Pillow for `make_gif.py`.
 
 ### Rebuilding the demo bundle
 
-`demo/` is committed so the quick demo works without a build. After a code
-change, refresh it by rebuilding the release binary and copying it (plus the
-bundled libs and music) into `demo/`:
+`demo/` is committed so the quick start works without a build. After a code
+change, refresh it:
 
 ```sh
 cargo build --release
@@ -122,249 +266,14 @@ The shared libraries in `demo/lib/` (glibc loader, `libc`, `libm`, `libgcc_s`,
 binary and its whole audio stack resolve from the bundle — no system
 dependencies.
 
-## Run
+### Updating the toolchain
+
+Bump the `nixpkgs` tag in `flake.nix` (e.g. `nixos-25.11` → `nixos-26.05`) and
+re-lock:
 
 ```sh
-./demo.sh                 # interactive (press q to quit)
-./demo.sh --grey          # Grey Quarttrochrome palette
-./demo.sh --dump 360 80 24  # headless: print frames to stdout
+nix flake update nixpkgs
 ```
-
-The UI resizes live with the terminal (btop-style) — drag the window and it
-reflows, keeping the 3D model centered between the title and the loader. The
-bar fills over ~12 s (stub), then the screen freezes and blows away.
-
-Music plays by default (embedded, via `rodio`); press `m` to mute/unmute.
-
-### Flags
-
-| Flag | Effect |
-|------|--------|
-| `--grey` | Use the Grey Quarttrochrome palette (default: Green) |
-| `--dark` / `--light` | Force the terminal theme instead of auto-detecting |
-| `--music FILE` | Play a specific track (else auto-detect `music/`) |
-| `--no-music` | Start with music off |
-| `--dump N [W H]` | Headless: print N frames to stdout |
-| `--layout [W H]` | Print the computed layout for a size and exit (debug aid) |
-| `--host HOST` | Run the real hack on the V100 machine `HOST`, over ssh |
-| `--sprint` | 1080 MHz instead of the daily 1053 MHz |
-| `--fast` | Skip the pacing of the status lines |
-| `--demo` | The simulated download: no hardware (what `./demo.sh` and `./demo/run.sh` run) |
-
-### Keys
-
-| Key | Effect |
-|-----|--------|
-| `q` | Quit |
-| `m` | Mute / unmute the music (music is on by default) |
-| drag | Grab the model and flick it to spin |
-
-## The real hack: V100 memory overclock
-
-The download is real: it raises the HBM2 memory clock of every NVIDIA Tesla
-V100 in a machine, live, with no VBIOS flash and no reboot. The work is done
-by [`v100-unlock`](v100-unlock/), a small root tool in this repo. The cracktro
-runs it, as root on the V100 machine, and shows its progress.
-
-| | memory clock | memory bandwidth |
-|---|---:|---:|
-| stock | 877.5 MHz | 898 GB/s |
-| daily (default) | 1053 MHz | +20% |
-| `--sprint` | 1080 MHz | +23% |
-
-Every card changes or none does. v100-unlock measures each card's real clock
-afterwards, and puts every card back if one is off, if anything fails, or if
-the cracktro goes away mid-run (quit, crash, a closed ssh connection). If the
-link just goes silent, the cracktro says so within about 15 seconds; check the
-cards with `v100-unlock status`. The change is volatile: a reboot, or
-`v100-unlock restore`, returns stock clocks. It adds bandwidth, not capacity:
-there is no hidden memory on these cards.
-
-**Setup on the V100 machine, once.** Build the static binary (no Rust is
-needed on the V100 machine; from a Mac add
-`RUSTFLAGS="-C linker=rust-lld -C target-feature=+crt-static"`), copy it
-over, install it root-owned, and let your user run exactly that binary as
-root:
-
-```sh
-cargo build -p v100-unlock --release --target x86_64-unknown-linux-musl
-sudo install -o root -g root -m 755 v100-unlock /usr/local/sbin/v100-unlock
-echo "$USER ALL=(root) NOPASSWD: /usr/local/sbin/v100-unlock" | sudo tee /etc/sudoers.d/v100-unlock
-sudo chmod 440 /etc/sudoers.d/v100-unlock
-```
-
-**Run.**
-
-```sh
-fbr-ram-downloader --host c4130   # from your own machine; the music plays there
-fbr-ram-downloader                # on the V100 machine itself
-v100-unlock status                # every card's clock, measured (read-only)
-v100-unlock restore               # back to stock
-```
-
-It writes GPU registers as root. It is validated on 4× V100-SXM2-16GB; every
-Tesla V100 model is accepted, but 1053 MHz is untested on the others (the
-FHHL starts at 810 MHz, so for it the daily clock is +30%).
-
-## Music
-
-Drop a track in `music/` (mp3/ogg/flac/wav/m4a/opus/aac). It auto-plays,
-looping, when you run the program — only inside the program, stopped cleanly
-on exit. The first audio file in `music/` (alphabetically) is used;
-`--music FILE` picks a specific one. Playback is in-process via `rodio`, so
-no external player (mpv/ffplay) is needed and the binary is fully
-self-contained. If no audio device is available it silently no-ops (the
-cracktro still runs).
-
-## Preview GIF
-
-```sh
-./demo.sh --dump 360 80 24 > /tmp/frames.txt
-python3 make_gif.py /tmp/frames.txt 2 preview.gif
-```
-
-Renders with **M+ Nerd Font Mono** (the "60" weight) and truecolor. (Run the
-second line inside the [Nix dev shell](#development-with-nix), which provides
-Python + Pillow.)
-
-## Tests
-
-```sh
-nix develop --command cargo test
-```
-
-(or `cargo test` inside the [Nix dev shell](#development-with-nix).)
-
-The layout and the logo's centering are unit-tested: the model never touches
-the border, always stays inside its region, clears the loader, is horizontally
-centered and sits below centre by exactly `MODEL_V_BIAS`, and the drawn logo
-stays within 0.75 cells of its frame center over a full spin (measured 0.50).
-
-## Layout
-
-```
-src/
-  main.rs    entry point, event loop, live resize, flags, --dump mode
-  scene.rs   3D scene: extruded logo + warp starfield (painter's algorithm)
-  tui.rs     the cracktro: starfield, 3D title, logo, bar, marquee, blow-away ending
-  canvas.rs  4-color Game Boy palettes, shimmer, truecolor ANSI canvas
-  music.rs   optional looping background music (auto-detect music/)
-  hack.rs    the pluggable Hack trait + StubHack (simulated)
-```
-
-## Plugging in the real hack
-
-The cracktro is only the *presentation layer*. Everything it displays comes
-from one small interface, [`Hack`](src/hack.rs), so the whole UI is decoupled
-from the real RAM-unlock work. Today it is driven by `StubHack`, which fakes a
-12-second download so the visuals can be developed standalone.
-
-### The contract
-
-```rust
-pub trait Hack {
-    fn start(&mut self) -> Result<(), String>;  // called once, before the loop
-    fn poll(&mut self) -> HackState;            // once per frame; MUST be non-blocking
-    fn finish(&mut self) -> Result<(), String>; // called once on exit (success, quit or error)
-}
-
-pub struct HackState {
-    pub progress: f32,          // 0.0 ..= 1.0  -> the loader bar and percentage
-    pub status: String,         // status line, e.g. "mapping pages"
-    pub done: bool,             // true once finished -> freeze + blow-away ending
-    pub error: Option<String>,  // Some(..) -> shown, then the program exits with it
-}
-```
-
-Rules of the road:
-
-- `poll` is called about 30x/second and **must not block**. Kick off work in
-  `start` (or a background thread) and have `poll` only read the latest
-  snapshot. The frame loop drives the animation; a blocking `poll` stutters it.
-- `progress` is the only thing that moves the bar; `done` is the only thing
-  that triggers the celebration and the exit. Nothing else in the UI changes.
-- `finish` is always called, even on `q`/quit or error, so it is the place to
-  stop threads, free buffers, or unlock anything you locked.
-
-### Worked example: a C-backed hack
-
-1. **Put the C source in the repo**, e.g. `src/hack.c`, exposing a tiny C ABI:
-
-    ```c
-    #include <string.h>
-    static float g_progress; static int g_done;
-    int  hack_start(void) { g_progress = 0.0f; g_done = 0; /* ... */ return 0; }
-    float hack_progress(void) { return g_progress; }   /* 0..1 */
-    int  hack_done(void) { return g_done; }
-    int  hack_finish(void) { /* tear down */ return 0; }
-    void hack_status(char *buf, size_t len) { snprintf(buf, len, "mapping pages"); }
-    ```
-
-    For a long-running job, have `hack_start` spawn a thread that updates
-    `g_progress`/`g_done` and returns immediately.
-
-2. **Compile and link it** with a `build.rs` (add `cc` as a build-dependency in
-   `Cargo.toml`):
-
-    ```rust
-    // build.rs
-    fn main() { cc::Build::new().file("src/hack.c").compile("hack"); }
-    ```
-
-    ```toml
-    [build-dependencies]
-    cc = "1"
-    ```
-
-3. **Declare the ABI and implement `Hack`** in `src/hack.rs`:
-
-    ```rust
-    #[link(name = "hack")]
-    extern "C" {
-        fn hack_start() -> i32;
-        fn hack_progress() -> f32;
-        fn hack_status(buf: *mut u8, len: usize);
-        fn hack_done() -> i32;
-        fn hack_finish() -> i32;
-    }
-
-    pub struct CHack;
-
-    impl Hack for CHack {
-        fn start(&mut self) -> Result<(), String> {
-            if unsafe { hack_start() } == 0 { Ok(()) } else { Err("start failed".into()) }
-        }
-        fn poll(&mut self) -> HackState {
-            let mut buf = [0u8; 128];
-            unsafe { hack_status(buf.as_mut_ptr(), buf.len()) };
-            let status = String::from_utf8_lossy(&buf)
-                .split('\0').next().unwrap_or("").to_string();
-            HackState {
-                progress: unsafe { hack_progress() }.clamp(0.0, 1.0),
-                status,
-                done: unsafe { hack_done() } != 0,
-                error: None,
-            }
-        }
-        fn finish(&mut self) -> Result<(), String> {
-            unsafe { hack_finish() };
-            Ok(())
-        }
-    }
-    ```
-
-4. **Swap it in** in `make_hack()` in `src/main.rs` — the single integration
-   point used by both the interactive loop and `--dump`:
-
-    ```rust
-    fn make_hack() -> Box<dyn hack::Hack> {
-        Box::new(hack::CHack)
-    }
-    ```
-
-That is the entire integration. The starfield, 3D model, loader, scroller and
-blow-away ending are driven purely by `HackState`, so they need no changes.
-Use `--dump` to eyeball frames headlessly while wiring things up.
 
 ## Credits
 
@@ -392,71 +301,9 @@ The V100 memory overclock stands on other people's work:
   V100-SXM2-16GB: 1053 MHz daily, 1080 MHz sprint, 1107 MHz the wall, +10.1%
   plain decode and +8-9% speculative decode, byte-identical to stock.
 
-## Cracktro notes
+Shoutouts: Helix Collective, Nous Research, Eth Strat, Amp Code, Jensen Huang,
+Nvidia, Franck (TP art), Onslaught, Defame, Gina, Ziggy, Rob, Gary, Jeeva, DNV.
 
-- **Starfield**: warp effect — stars fly toward the viewer from center
-  (`scene.rs::Starfield`). The brightest stars pop in the lightest shade.
-- **3D models**: three embedded meshes are cycled through in order — the FBR
-  nano logo, the v100, and the P5000 — swapping to the next one every half-turn
-  of the *auto* rotation. The user can grab the model with the mouse and spin it
-  freely; that user-driven rotation does not count toward the swap, so grabbing
-  it never interrupts the cycle. Each model is rotated + perspective-projected,
-  backface-culled, depth-sorted, and flat-shaded, then rasterized to one
-  brightness sample per cell, which the TUI draws as a **dithered block**
-  (`░▒▓█`): every covered cell gets at least `░`, so the silhouette is always
-  solid, and the character density carries the shading (ordered-dithered, 4x4
-  Bayer). Color is the mid palette shade, brightening to the lightest for
-  highlights. The projection pre-compensates for the ~1:2 cell aspect, so each
-  model stays square.
-- **Lighting**: a key light that slowly precesses around the model, a rim light
-  orbiting the other way, and a gently breathing ambient. The interplay of the
-  model's spin with the two moving lights keeps the shading in constant,
-  non-repeating motion — this is what reveals the detail in the simplified
-  meshes.
-- **Centering**: each mesh is translated onto its own centroid before rotating,
-  so it spins about its middle and projects symmetrically. Horizontally the
-  layout centers it exactly; vertically it is placed deliberately **below**
-  centre by `MODEL_V_BIAS` in `tui.rs` (0.5 = dead centre, 1.0 = flush above the
-  loader), because the lit top face draws the eye upward — raise the constant to
-  move the model further down.
-- **Mouse grab + flick**: click and drag the logo to rotate it; release to
-  fling it with momentum. It damps back into the auto-spin. (crossterm mouse
-  capture; pitch is clamped so it can't be flipped over.)
-- **Title**: `CRACKED BY FBR ROM` sits centered in the top border, each
-  character color-cycled through the palette (the classic Game Boy shimmer).
-  The live terminal size is drawn top-left and the key hints right-aligned,
-  each only when it stays clear of the title.
-- **Loader**: the progress bar sits just above the scroller with a blank
-  breathing row between them. It is shade 2 only, with a shade-1 **dithered
-  shimmer** (`█▓▒`) that sweeps the whole bar in complete passes, Windows-7
-  style, independent of progress.
-- **Scroller**: a straight C64-style scroller along the bottom border,
-  chars color-cycled through the palette shades.
-- **Hints**: a dim `M MUTE • Q QUIT` sits right-aligned in the top border when
-  there is room clear of the title. On terminals below 80x24 the status line
-  asks you to `RESIZE FOR BEST FIT`.
-- **Responsive layout**: `tui::layout(w, h)` is a closed-form function of the
-  terminal size and the single source of truth for every position (see its doc
-  comment for the formulas). The model picks the largest size from a fixed
-  breakpoint table — `56x28, 48x24, 40x20, 32x16, 24x12, 18x9, 14x7, 10x5`
-  cells —
-  that fits both the available width and the rows between the title and the
-  loader, then is centered with `x = (w - mw) / 2`, `y = (h - mh) / 2` clamped
-  into the region. Below the smallest breakpoint the model is omitted rather
-  than drawn as a sliver. `--layout W H` prints the result.
-- **Resize robustness**: the terminal size is re-read every frame (a cheap
-  ioctl) rather than trusted only from `Resize` events, which some terminals
-  and multiplexers do not deliver reliably — a stale size would mis-frame the
-  whole composition.
-- **Containment**: every element is clamped to the inner area; only the frame
-  characters ever touch row 0 / row h-1 / column 0 / column w-1.
-- **Blow-away ending**: on `done`, the whole screen freezes, then blows
-  away — a gust sweeps left to right and every character falls off the
-  bottom (`tui.rs::Celebration`), leaving a blinking "RAM UNLOCKED • DONE".
-  The celebration runs ~3.5 s, then the program exits.
-- **Live resize**: btop-style — the per-frame size poll (above) detects the
-  change and reflows the scene/cracktro, and ratatui's `draw` auto-resizes its
-  back-buffer to the same size and diffs it, writing only the changed cells.
-  So a resize reflows cleanly with no blank flash and no full-screen reprint.
-- **Greetings**: edit `GREETINGS` in `src/tui.rs` to change the bottom
-  scroller text.
+## License
+
+See [LICENSE](LICENSE).

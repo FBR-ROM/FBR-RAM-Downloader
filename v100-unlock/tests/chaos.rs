@@ -195,6 +195,7 @@ fn kind_index(kind: Kind) -> usize {
         Kind::Refused => 1,
         Kind::RolledBack => 2,
         Kind::Unknown => 3,
+        Kind::Dry => panic!("the chaos scenarios never dry-run"),
     }
 }
 
@@ -250,6 +251,7 @@ fn check_hardware(s: &Scenario, rig: &Rig, starts: &[u8], outcome: &Outcome, con
                 assert_eq!(ends[i], starts[i], "healthy card not put back: {context}");
             }
         }
+        Kind::Dry => panic!("the chaos scenarios never dry-run"),
     }
 }
 

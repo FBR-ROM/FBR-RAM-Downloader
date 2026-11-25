@@ -15,6 +15,10 @@ fn every_line_survives_a_round_trip() {
             "hbm 877.5 → 1053.0 MHz (+20%) · 4 cards",
         )),
         Line::End(Outcome::new(Kind::RolledBack, "06:00.0: PLL did not lock")),
+        Line::End(Outcome::new(
+            Kind::Dry,
+            "dry run: hbm 877.5 → 1053.0 MHz (+20%) · 4 cards · nothing written",
+        )),
     ];
     for line in &lines {
         assert_eq!(parse(&encode(line)).as_ref(), Ok(line));
@@ -59,6 +63,7 @@ fn a_trailing_carriage_return_from_a_pty_is_ignored() {
 #[test]
 fn each_outcome_maps_to_the_state_the_hardware_is_in() {
     assert_eq!(Kind::Done.exit_code(), 0);
+    assert_eq!(Kind::Dry.exit_code(), 0, "a dry run did what it was told to do");
     assert_eq!(Kind::Refused.exit_code(), 2);
     assert_eq!(Kind::RolledBack.exit_code(), 3);
     assert_eq!(Kind::Unknown.exit_code(), 4);

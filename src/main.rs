@@ -56,6 +56,8 @@ struct Args {
     host: Option<String>,
     /// `--sprint`: 1080 MHz instead of 1053.
     sprint: bool,
+    /// `--dry-run`: survey and report, but write nothing.
+    dry_run: bool,
     /// `--fast`: no pacing of the status lines.
     fast: bool,
 }
@@ -73,6 +75,7 @@ fn parse_args() -> Args {
         demo: false,
         host: None,
         sprint: false,
+        dry_run: false,
         fast: false,
     };
     let mut i = 1;
@@ -120,6 +123,10 @@ fn parse_args() -> Args {
                 args.sprint = true;
                 i += 1;
             }
+            "--dry-run" => {
+                args.dry_run = true;
+                i += 1;
+            }
             "--fast" => {
                 args.fast = true;
                 i += 1;
@@ -149,7 +156,7 @@ fn make_hack(args: &Args) -> Box<dyn hack::Hack> {
     if args.demo {
         return Box::new(hack::StubHack::new());
     }
-    Box::new(v100::V100Hack::new(args.host.clone(), args.sprint, args.fast))
+    Box::new(v100::V100Hack::new(args.host.clone(), args.sprint, args.dry_run, args.fast))
 }
 
 /// Errors are printed as the plain sentence they are (a `main` that returns

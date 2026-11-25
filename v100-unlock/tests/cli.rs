@@ -31,6 +31,16 @@ fn commands_and_options_parse() {
     assert!(full.events);
     assert_eq!(full.simulate, Some(4));
     assert_eq!(full.cards.len(), 1);
+
+    let dry = cli("apply --dry-run").unwrap();
+    assert!(dry.dry_run);
+    assert_eq!(dry.simulate, None);
+    let demo = cli("apply --demo").unwrap();
+    assert_eq!(demo.simulate, Some(4), "--demo is a 4-card simulated run");
+    assert!(!demo.dry_run);
+    let both = cli("apply --demo --dry-run").unwrap();
+    assert_eq!(both.simulate, Some(4));
+    assert!(both.dry_run);
 }
 
 #[test]
@@ -136,6 +146,22 @@ fn human_mode_prints_the_steps_the_receipt_and_the_result() {
         out.ends_with("done: hbm 877.5 → 1053.0 MHz (+20%) · 1 card\n"),
         "{out}"
     );
+}
+
+#[test]
+fn a_dry_run_reports_what_would_happen_and_writes_nothing() {
+    let (code, out, _) = v100_unlock("apply --demo --dry-run", true);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.starts_with("found 4 × V100-SXM2-16GB\n"), "{out}");
+    assert!(
+        out.contains("04:00.0 · V100-SXM2-16GB · 877.5 → 1053.0 MHz · would change"),
+        "{out}"
+    );
+    assert!(
+        out.ends_with("dry run: hbm 877.5 → 1053.0 MHz (+20%) · 4 cards · nothing written\n"),
+        "{out}"
+    );
+    assert!(!out.contains("reboot"), "no volatility note: nothing was written");
 }
 
 #[test]

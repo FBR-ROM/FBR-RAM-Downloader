@@ -33,6 +33,7 @@ type Received = Result<Line, String>;
 pub struct V100Hack {
     host: Option<String>,
     sprint: bool,
+    dry_run: bool,
     show: Presenter,
     started: Instant,
     child: Option<Child>,
@@ -42,11 +43,12 @@ pub struct V100Hack {
 
 impl V100Hack {
     /// `host`: a V100 machine to reach over ssh; `None` for this machine.
-    pub fn new(host: Option<String>, sprint: bool, fast: bool) -> Self {
+    pub fn new(host: Option<String>, sprint: bool, dry_run: bool, fast: bool) -> Self {
         let dwell = if fast { Duration::ZERO } else { DWELL };
         Self {
             host,
             sprint,
+            dry_run,
             show: Presenter::new(dwell),
             started: Instant::now(),
             child: None,
@@ -63,6 +65,9 @@ impl V100Hack {
         let mut agent = vec![AGENT, "apply", "--events"];
         if self.sprint {
             agent.push("--sprint");
+        }
+        if self.dry_run {
+            agent.push("--dry-run");
         }
         match &self.host {
             Some(host) if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) => {
@@ -244,6 +249,7 @@ impl Hack for V100Hack {
 fn receipt_end(outcome: &Outcome) -> String {
     let verdict = match outcome.kind {
         Kind::Done => "done",
+        Kind::Dry => "dry run",
         Kind::Refused => "nothing changed",
         Kind::RolledBack => "rolled back",
         Kind::Unknown => "UNKNOWN STATE",
@@ -277,7 +283,13 @@ impl Presenter {
             dwell,
             queue: VecDeque::new(),
             shown_at: None,
-            state: HackState { progress: 0.0, status: "connecting".into(), done: false, error: None },
+            state: HackState {
+                progress: 0.0,
+                status: "connecting".into(),
+                done: false,
+                error: None,
+                done_message: None,
+            },
             receipt: Vec::new(),
             outcome: None,
         }
@@ -315,10 +327,14 @@ impl Presenter {
                 self.state.status = text;
             }
             Line::End(outcome) => match outcome.kind {
-                Kind::Done => {
+                Kind::Done | Kind::Dry => {
                     self.state.progress = 1.0;
-                    self.state.status = outcome.summary;
+                    self.state.status = outcome.summary.clone();
                     self.state.done = true;
+                    // The receipt's headline is the completion message:
+                    // "hbm 877.5 → 1053.0 MHz (+20%) · 4 cards", or the
+                    // "dry run: ... · nothing written" line for a dry run.
+                    self.state.done_message = Some(outcome.summary);
                 }
                 _ => self.state.error = Some(receipt_end(&outcome)),
             },
@@ -379,7 +395,7 @@ mod tests {
         for line in lines {
             tx.send(Ok(line)).unwrap();
         }
-        let mut hack = V100Hack::new(Some("c4130".into()), false, true);
+        let mut hack = V100Hack::new(Some("c4130".into()), false, false, true);
         hack.lines = Some(rx);
         hack
     }
@@ -416,9 +432,9 @@ mod tests {
     #[test]
     fn a_host_cannot_smuggle_in_ssh_options() {
         for host in ["-oProxyCommand=sh", "", "c4130 rm"] {
-            let hack = V100Hack::new(Some(host.into()), false, false);
+            let hack = V100Hack::new(Some(host.into()), false, false, false);
             assert!(hack.command().is_err(), "{host:?}");
         }
-        assert!(V100Hack::new(Some("c4130".into()), false, false).command().is_ok());
+        assert!(V100Hack::new(Some("c4130".into()), false, false, false).command().is_ok());
     }
 }

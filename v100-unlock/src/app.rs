@@ -41,8 +41,13 @@ fn change(cli: &Cli, goal: Goal) -> i32 {
     host::watch_for_cancel(cli.events);
     let mut out = Output::new(cli.events);
     out.header();
-    let outcome = with_cards(cli, Access::ReadWrite, |units, clock| {
-        run(units, goal, clock, &host::cancelled, &mut |line| {
+    // A dry run writes nothing, so it opens the cards read-only and takes no
+    // lock: it is the way to see what a run would do before committing.
+    // (Reading the registers still needs root on real hardware, as `status`
+    // does; `--simulate` needs neither.)
+    let access = if cli.dry_run { Access::ReadOnly } else { Access::ReadWrite };
+    let outcome = with_cards(cli, access, |units, clock| {
+        run(units, goal, clock, &host::cancelled, cli.dry_run, &mut |line| {
             out.line(&line)
         })
     })
@@ -163,6 +168,7 @@ impl Output {
         }
         let verdict = match outcome.kind {
             Kind::Done => return print_line(&format!("\ndone: {}", outcome.summary)),
+            Kind::Dry => return print_line(&format!("\n{}", outcome.summary)),
             Kind::Refused => "refused",
             Kind::RolledBack => "rolled back",
             Kind::Unknown => "UNKNOWN STATE",

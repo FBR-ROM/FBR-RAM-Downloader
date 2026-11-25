@@ -1,0 +1,7 @@
+# The V100 agent is shipped as a static musl binary so it runs on any Linux
+# distro with no system dependencies. rust-lld (bundled with the toolchain)
+# links it, and +crt-static makes it fully self-contained. This only affects
+# the musl target; the normal gnu build is untouched.
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "target-feature=+crt-static"]

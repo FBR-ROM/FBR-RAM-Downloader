@@ -72,8 +72,17 @@ impl Rig {
     }
 
     pub fn go(&self, goal: Goal, cancelled: &dyn Fn() -> bool) -> (Outcome, Vec<Line>) {
+        self.go_dry(goal, cancelled, false)
+    }
+
+    pub fn go_dry(
+        &self,
+        goal: Goal,
+        cancelled: &dyn Fn() -> bool,
+        dry_run: bool,
+    ) -> (Outcome, Vec<Line>) {
         let mut lines = Vec::new();
-        let outcome = run(&self.units(), goal, &self.clock, cancelled, &mut |line| {
+        let outcome = run(&self.units(), goal, &self.clock, cancelled, dry_run, &mut |line| {
             lines.push(line)
         });
         (outcome, lines)

@@ -17,6 +17,9 @@ pub struct HackState {
     pub done: bool,
     /// Set on failure; the TUI shows it and stops.
     pub error: Option<String>,
+    /// The completion message, shown where the bar was and left blinking
+    /// after the blow-away. `None` keeps the default "RAM UNLOCKED • DONE".
+    pub done_message: Option<String>,
 }
 
 /// The contract the TUI needs from the hack. Object-safe so it can be
@@ -78,6 +81,7 @@ impl Hack for StubHack {
             status,
             done: self.done,
             error: None,
+            done_message: None,
         }
     }
 
