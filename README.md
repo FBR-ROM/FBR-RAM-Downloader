@@ -4,8 +4,10 @@ A Game Boy DMG/MGB-styled cracktro for the FBR RAM-unlock hack: a warp
 starfield, a shimmering border title, three 3D models that cycle as they spin
 (the FBR nano logo, the v100, and the P5000), a "DOWNLOADING RAM" loader with a
 Windows-7-style shimmer, a straight color-cycled scroller, and a
-freeze-then-blow-away ending. The hack is pluggable — today it's a simulated
-stub so the UI can be developed and demoed standalone.
+freeze-then-blow-away ending. The hack is pluggable. The real one raises the
+memory clock of NVIDIA Tesla V100 GPUs
+([below](#the-real-hack-v100-memory-overclock)); `--demo` runs a simulated
+download so the UI can be developed and demoed anywhere.
 
 How it works, and why it is built this way, is documented in
 [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -144,6 +146,10 @@ Music plays by default (embedded, via `rodio`); press `m` to mute/unmute.
 | `--no-music` | Start with music off |
 | `--dump N [W H]` | Headless: print N frames to stdout |
 | `--layout [W H]` | Print the computed layout for a size and exit (debug aid) |
+| `--host HOST` | Run the real hack on the V100 machine `HOST`, over ssh |
+| `--sprint` | 1080 MHz instead of the daily 1053 MHz |
+| `--fast` | Skip the pacing of the status lines |
+| `--demo` | The simulated download: no hardware (what `./demo.sh` and `./demo/run.sh` run) |
 
 ### Keys
 
@@ -152,6 +158,53 @@ Music plays by default (embedded, via `rodio`); press `m` to mute/unmute.
 | `q` | Quit |
 | `m` | Mute / unmute the music (music is on by default) |
 | drag | Grab the model and flick it to spin |
+
+## The real hack: V100 memory overclock
+
+The download is real: it raises the HBM2 memory clock of every NVIDIA Tesla
+V100 in a machine, live, with no VBIOS flash and no reboot. The work is done
+by [`v100-unlock`](v100-unlock/), a small root tool in this repo. The cracktro
+runs it, as root on the V100 machine, and shows its progress.
+
+| | memory clock | memory bandwidth |
+|---|---:|---:|
+| stock | 877.5 MHz | 898 GB/s |
+| daily (default) | 1053 MHz | +20% |
+| `--sprint` | 1080 MHz | +23% |
+
+Every card changes or none does. v100-unlock measures each card's real clock
+afterwards, and puts every card back if one is off, if anything fails, or if
+the cracktro goes away mid-run (quit, crash, a closed ssh connection). If the
+link just goes silent, the cracktro says so within about 15 seconds; check the
+cards with `v100-unlock status`. The change is volatile: a reboot, or
+`v100-unlock restore`, returns stock clocks. It adds bandwidth, not capacity:
+there is no hidden memory on these cards.
+
+**Setup on the V100 machine, once.** Build the static binary (no Rust is
+needed on the V100 machine; from a Mac add
+`RUSTFLAGS="-C linker=rust-lld -C target-feature=+crt-static"`), copy it
+over, install it root-owned, and let your user run exactly that binary as
+root:
+
+```sh
+cargo build -p v100-unlock --release --target x86_64-unknown-linux-musl
+sudo install -o root -g root -m 755 v100-unlock /usr/local/sbin/v100-unlock
+echo "$USER ALL=(root) NOPASSWD: /usr/local/sbin/v100-unlock" | sudo tee /etc/sudoers.d/v100-unlock
+sudo chmod 440 /etc/sudoers.d/v100-unlock
+```
+
+**Run.**
+
+```sh
+fbr-ram-downloader --host c4130   # from your own machine; the music plays there
+fbr-ram-downloader                # on the V100 machine itself
+v100-unlock status                # every card's clock, measured (read-only)
+v100-unlock restore               # back to stock
+```
+
+It writes GPU registers as root. It is validated on 4× V100-SXM2-16GB; every
+Tesla V100 model is accepted, but 1053 MHz is untested on the others (the
+FHHL starts at 810 MHz, so for it the daily clock is +30%).
 
 ## Music
 
@@ -312,6 +365,32 @@ Rules of the road:
 That is the entire integration. The starfield, 3D model, loader, scroller and
 blow-away ending are driven purely by `HackState`, so they need no changes.
 Use `--dump` to eyeball frames headlessly while wiring things up.
+
+## Credits
+
+The V100 memory overclock stands on other people's work:
+
+- [amoghmunikote/cmpunlocker](https://github.com/amoghmunikote/cmpunlocker)
+  (GPL-2.0): the base, a runtime unlock of the CMP 170HX through a patched
+  driver.
+- [asm64-hooligan/cmpunlocker, `mem_overclock`](https://github.com/asm64-hooligan/cmpunlocker/tree/mem_overclock)
+  (GPL-2.0): the method, one write of the HBM PLL coefficient to the
+  multicast register `0x98BC98` followed by a lock poll, and the memory PLL
+  register map, on GA100.
+- [cachenetics/170tune](https://github.com/cachenetics/170tune) (MIT): the
+  same write from userspace, the all-ones false-lock check, the write-back on
+  lock timeout, and the exit-code convention used here. See [NOTICE](NOTICE).
+- [duggasco/CMP100-210](https://github.com/duggasco/CMP100-210)
+  (PolyForm Noncommercial / CC BY-NC): GV100 facts, the `PMC_BOOT_0` canary,
+  never reading `0x98BC98`, and the per-partition PLL layout. No code from it
+  is included.
+- v100-overclock, this project's own research: found that `0x98BC98` is
+  where GV100 devinit writes the HBM clock and that writing it works live;
+  showed the CMP kit's switch sequence is unusable on SXM2 (21-35% less
+  bandwidth, 5 of 7 attempts crashed the card or host); built the CUDA-free
+  clock meter from the DRAM cycle counters; and laddered and qualified 4×
+  V100-SXM2-16GB: 1053 MHz daily, 1080 MHz sprint, 1107 MHz the wall, +10.1%
+  plain decode and +8-9% speculative decode, byte-identical to stock.
 
 ## Cracktro notes
 
