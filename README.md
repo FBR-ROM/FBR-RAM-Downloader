@@ -10,68 +10,46 @@ How the cracktro is put together is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## How it works
 
-Overclocking is free performance. On a gaming card you raise the core clock,
-memory clock, voltage with sliders that talk to Nvidia's driver and tell it to
-set the card to whatever you specified. On the V100, Nvidia's datacenter chip,
-that door is deliberately shut: the driver exposes only one memory speed,
-877 MHz, versus the hundreds on gaming cards. Editing the card's firmware to go
-faster doesn't work either — the firmware is signed, and the card rejects
-anything without Nvidia's signature.
+Nvidia locked overclocking on the V100. The driver exposes one memory speed —
+877 MHz — versus the hundreds on gaming cards, and the firmware is signed, so
+you can't flash a faster one. Yet the same chip runs its memory at 1107 MHz in
+the V100S: the faster SKU is just an overclock.
 
-Yet the same chip runs its memory at 1107 MHz in the V100S. Nvidia locked down
-overclocking on the V100 so they could sell you a more expensive, faster SKU
-that is just overclocked.
+The lock has a gap: the driver only polices requests that go through the
+driver. With root on the machine you can write the registers directly. The
+memory clock is a number in one of them — a 27 MHz reference multiplied by a
+divider. Nvidia's setting gives 877.5 MHz; change the setting and you change
+the clock.
 
-Nvidia left a gap in that lock: the driver can only police requests that go
-through the driver. It does not stop you, the user, from writing straight into
-the registers and doing whatever you want with them, as long as you have admin
-rights on the machine.
+One write to a multicast address hits all 16 of the card's memory controllers at
+once, and the memory switches over in about a ten-thousandth of a second. No
+reboot, no driver reload, no firmware touched.
 
-The memory clock on a V100 is a number in one of those registers: a 27 MHz
-reference clock multiplied by a setting. Nvidia's setting gives you 877.5 MHz.
-Change the setting and you change the clock. All it takes is one write to a
-multicast address, which hits all 16 of the card's memory controllers at once,
-and the memory switches over in about a ten-thousandth of a second — no reboot,
-no driver reload.
-
-We didn't come up with this in isolation. People found this vulnerability while
-unlocking Nvidia's crypto-mining cards, which Nvidia also deliberately
-crippled, and we ported the logic to the V100. The unlock kit for the CMP
-100–210 (literally a V100 with a different name) changes the memory clock by
-putting the memory to sleep, stopping the clocks, and restarting them; on our
-cards that crashed the card or the whole server 5 out of 7 times. The single
-write from 170tune (made for a different mining card) worked, because the
-multicast handled everything for us.
-
-From there we went up one step at a time, testing the memory for errors at every
-step, until 1107 MHz, where it started throwing errors straight away. We ended
-up at 1053 MHz: 20% more memory bandwidth for free. The driver doesn't even
-know — Nvidia's own tool will report the card running at 1053 MHz while still
-saying 877 MHz is the max.
+We ported this from the crypto-mining-card unlocks (Nvidia crippled those too).
+The CMP 100–210 kit — a V100 under another name — changes the clock by putting
+the memory to sleep, stopping the clocks, and restarting them; on our cards that
+crashed the card or the host 5 of 7 times. The single write from 170tune (a
+different mining card) worked, because the multicast handled all 16
+controllers. We laddered up one step at a time, memtesting at each, until
+1107 MHz threw errors immediately. 1053 MHz held: +20% memory bandwidth for
+free. The driver doesn't know — `nvidia-smi` reports the card at 1053 MHz while
+still saying 877 MHz is the max.
 
 ### It checks everything
 
-Writing straight into a chip's registers can go wrong, so the tool checks
-everything. After the change it counts the memory's actual clock ticks to make
-sure every card really is at the new speed (within 1 MHz). It is all-or-nothing:
-if one card is off, something fails, or you quit halfway, every card is put back
-to where it started. Nothing is permanent — no firmware is touched, and a
-reboot puts it back to stock.
+Writing registers can go wrong, so the tool checks everything. After the change
+it counts the memory's actual clock ticks to confirm every card is at the new
+speed (within 1 MHz). It is all-or-nothing: if one card is off, something
+fails, or you quit halfway, every card is written back to where it started.
+Nothing is permanent — a reboot, or `v100-unlock restore`, returns stock.
 
-1053 MHz is what held up in our stability testing on these cards; `--sprint`
-takes it to 1080 if you want to push it. You can run it as a systemd unit so it
-starts on boot.
+1053 MHz is what held in stability testing; `--sprint` pushes to 1080. Run it
+as a systemd unit to apply on boot. This is faster memory, not more — a 16 (or
+32) GB card is still 16 (or 32) GB. The speedup shows up in memory-bound work,
+like LLM inference, not in pure number crunching.
 
-Keep in mind this is faster memory, not more memory: your 16 (or 32) GB card is
-still 16 (or 32) GB. You'll see the speedup in work that is waiting on memory —
-running inference on LLMs — not in pure number crunching.
-
-We have tested this on P-series and V-series cards, not above. There is a chance
-it can work on A-series cards, or could be ported to; if you figure that out, a
-PR to expand the tool would be great.
-
-We are about to announce some more goodies for the non-hyperscale market of
-inference enjoyers, and this is our first gift back.
+Tested on P-series and V-series cards, not above. A-series may work or be
+portable; a PR to expand the tool is welcome.
 
 Happy cracking.
 
