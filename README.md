@@ -1,23 +1,22 @@
 # FBR RAM Downloader NVIDIA
 
-A Game Boy DMG/MGB-styled cracktro that runs a real overclock: it raises the
+A cack that runs a real overclock: it raises the
 HBM2 memory clock of every NVIDIA Tesla V100 in a machine, live, with no VBIOS
-flash and no reboot. The cracktro is the presentation; the work is done by
-[`v100-unlock`](v100-unlock/), a small root tool in this repo. `--demo` runs a
+flash and no reboot. `--demo` runs a
 simulated download so the cracktro can be demoed anywhere.
 
 How the cracktro is put together is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## How it works
 
-Nvidia locked overclocking on the V100. The driver exposes one memory speed —
-877 MHz — versus the hundreds on gaming cards, and the firmware is signed, so
+Nvidia locked overclocking on the V100. The driver exposes one memory speed,
+877 MHz, versus the hundreds on gaming cards. The firmware is signed, so
 you can't flash a faster one. Yet the same chip runs its memory at 1107 MHz in
 the V100S: the faster SKU is just an overclock.
 
 The lock has a gap: the driver only polices requests that go through the
 driver. With root on the machine you can write the registers directly. The
-memory clock is a number in one of them — a 27 MHz reference multiplied by a
+memory clock is a number in one of them: a 27 MHz reference multiplied by a
 divider. Nvidia's setting gives 877.5 MHz; change the setting and you change
 the clock.
 
@@ -25,12 +24,12 @@ One write to a multicast address hits all 16 of the card's memory controllers at
 once, and the memory switches over in about a ten-thousandth of a second. No
 reboot, no driver reload, no firmware touched.
 
-We ported this from the crypto-mining-card unlocks (Nvidia crippled those too).
-The CMP 100–210 kit — a V100 under another name — changes the clock by putting
+We ported this logic from the crypto-mining-card unlocks (Nvidia crippled those too).
+The CMP 100–210 kit (a V100 under another name) changes the clock by putting
 the memory to sleep, stopping the clocks, and restarting them; on our cards that
 crashed the card or the host 5 of 7 times. The single write from 170tune (a
-different mining card) worked, because the multicast handled all 16
-controllers. We laddered up one step at a time, memtesting at each, until
+different mining card hack) kinda worked, because the multicast handled all 16
+controllers. We laddered up one step at a time, memtesting at each...
 1107 MHz threw errors immediately. 1053 MHz held: +20% memory bandwidth for
 free. The driver doesn't know — `nvidia-smi` reports the card at 1053 MHz while
 still saying 877 MHz is the max.
@@ -44,7 +43,7 @@ fails, or you quit halfway, every card is written back to where it started.
 Nothing is permanent — a reboot, or `v100-unlock restore`, returns stock.
 
 1053 MHz is what held in stability testing; `--sprint` pushes to 1080. Run it
-as a systemd unit to apply on boot. This is faster memory, not more — a 16 (or
+as a systemd unit to apply on boot. This is faster memory, not more: a 16 (or
 32) GB card is still 16 (or 32) GB. The speedup shows up in memory-bound work,
 like LLM inference, not in pure number crunching.
 
