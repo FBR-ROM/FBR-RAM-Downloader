@@ -11,9 +11,11 @@
 //! Flags:
 //!   --host HOST      run on the V100 machine HOST, over ssh
 //!   --sprint         1080 MHz instead of the daily 1053 MHz
+//!   --dry-run        survey and report, write nothing
 //!   --fast           skip the pacing of the status lines
 //!   --demo           the simulated download, no hardware
-//!   --dump N [W H]   headless: print N frames to stdout
+//!   --headless       run the V100 agent, stream its plain text, no cracktro
+//!   --dump N [W H]   print N frames to stdout (for verification / GIF)
 //!   --layout [W H]   print the computed layout for a size and exit
 //!   --grey           use the Grey Quarttrochrome palette (default: Green)
 //!   --dark/--light   force the terminal theme (default: auto-detect)
@@ -60,6 +62,8 @@ struct Args {
     dry_run: bool,
     /// `--fast`: no pacing of the status lines.
     fast: bool,
+    /// `--headless`: run the V100 agent and stream its plain text; no cracktro.
+    headless: bool,
 }
 
 fn parse_args() -> Args {
@@ -77,6 +81,7 @@ fn parse_args() -> Args {
         sprint: false,
         dry_run: false,
         fast: false,
+        headless: false,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -131,6 +136,10 @@ fn parse_args() -> Args {
                 args.fast = true;
                 i += 1;
             }
+            "--headless" => {
+                args.headless = true;
+                i += 1;
+            }
             "--host" => {
                 args.host = argv.get(i + 1).cloned();
                 i += 2;
@@ -162,7 +171,14 @@ fn make_hack(args: &Args) -> Box<dyn hack::Hack> {
 /// Errors are printed as the plain sentence they are (a `main` that returns
 /// `Result` prints their debug form, in quotes).
 fn main() -> std::process::ExitCode {
-    match run() {
+    let args = parse_args();
+    // `--headless` runs the V100 agent and streams its plain text, returning
+    // the agent's own exit code (0 at target, 2 untouched, 3 put back, 4
+    // unknown). No terminal, no cracktro — for scripts and systemd.
+    if args.headless {
+        return v100::run_headless(&args.host, args.sprint, args.dry_run, args.demo);
+    }
+    match run_with(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");
@@ -171,8 +187,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args = parse_args();
+fn run_with(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let palette = if args.grey {
         canvas::Palette::grey()
     } else {

@@ -1,6 +1,6 @@
 # FBR RAM Downloader — Nix flake.
 #
-# Two things live here:
+# Three things live here:
 #
 #   1. A development environment (`devShells.default`) for building, testing
 #      and running the cracktro. Enter it with:
@@ -9,16 +9,32 @@
 #
 #      Inside, `cargo build`, `cargo test` and `./demo.sh` all work.
 #
-#   2. An installable package (`packages.default`) that builds the release
-#      binary. Build / run / install it with:
+#   2. Installable packages, importable from any other flake:
+#
+#          packages.<system>.default   the cracktro (built from source)
+#          packages.<system>.agent     the static v100-unlock root tool
+#
+#      Build / run / install them with:
 #
 #          nix build .            # -> result/bin/fbr-ram-downloader
-#          nix run .              # run it directly
-#          nix profile install .  # install into your nix profile
+#          nix build .#agent      # -> result/bin/v100-unlock
+#          nix run .              # run the cracktro directly
+#          nix profile install .  # install the cracktro into your nix profile
 #
-# The build is reproducible: it uses the committed Cargo.lock (exact crate
-# versions + hashes) and fetches the crates in the non-sandboxed fetch phase,
-# so the sandboxed build itself needs no network.
+#      Or import this flake:
+#
+#          inputs.fbr.url = "github:FBR-ROM/FBR-RAM-Downloader";
+#          ...
+#          environment.systemPackages = [
+#            inputs.fbr.packages.${system}.default   # the cracktro
+#            inputs.fbr.packages.${system}.agent     # the root tool
+#          ];
+#
+# The cracktro is built from source, reproducibly: it uses the committed
+# Cargo.lock (exact crate versions + hashes) and fetches the crates in the
+# non-sandboxed fetch phase, so the sandboxed build itself needs no network.
+# The agent is a committed static binary (no system dependencies), so its
+# package just installs it — it runs on any Linux regardless of glibc.
 
 {
   description = "FBR RAM Downloader — Game Boy cracktro TUI";
@@ -73,12 +89,35 @@
         mainProgram = "fbr-ram-downloader";
       };
     };
+
+    # The static V100 agent. It is committed (demo/v100-unlock), built as a
+    # musl static binary with no system dependencies, so this package just
+    # installs it — it runs on any Linux regardless of the system glibc.
+    # A plain runCommand (not a stdenv derivation) avoids the fetch/unpack
+    # machinery that a single file trips over.
+    agent = pkgs: pkgs.runCommand "v100-unlock-0.1.0" {
+      preferLocalBuild = true;
+      meta = {
+        description = "Static root tool that raises the HBM memory clock of every Tesla V100";
+        license = pkgs.lib.licenses.unlicense;
+        platforms = [ "x86_64-linux" "aarch64-linux" ];
+        mainProgram = "v100-unlock";
+      };
+    } ''
+      mkdir -p $out/bin
+      install -m 755 ${./demo/v100-unlock} $out/bin/v100-unlock
+    '';
   in
   {
     # Installable packages: `nix build .`, `nix run .`, `nix profile install .`
-    packages = forAllSystems (pkgs: {
-      default = package pkgs;
-    });
+    # The agent is a Linux-only static binary, so it is only offered on Linux.
+    packages = forAllSystems (pkgs:
+      {
+        default = package pkgs;
+      }
+      // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        agent = agent pkgs;
+      });
     defaultPackage = nixpkgs.lib.genAttrs systems (system:
       self.packages.${system}.default);
 

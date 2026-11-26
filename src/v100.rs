@@ -62,36 +62,9 @@ impl V100Hack {
     }
 
     fn command(&self) -> Result<Command, String> {
-        let mut agent = vec![AGENT, "apply", "--events"];
-        if self.sprint {
-            agent.push("--sprint");
-        }
-        if self.dry_run {
-            agent.push("--dry-run");
-        }
-        match &self.host {
-            Some(host) if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) => {
-                Err(format!("{host:?} is not a host name"))
-            }
-            Some(host) => {
-                let mut ssh = Command::new("ssh");
-                // BatchMode: fail instead of prompting under the cracktro's screen.
-                // ServerAlive: notice a dead link within about 15 s instead of hanging.
-                ssh.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]);
-                ssh.args(["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]);
-                ssh.args(["--", host, "sudo", "-n"]);
-                ssh.args(agent);
-                Ok(ssh)
-            }
-            None if !cfg!(target_os = "linux") => {
-                Err("no V100 here: use --host to reach a V100 machine, or --demo".into())
-            }
-            None => {
-                let mut sudo = Command::new("sudo");
-                sudo.args(agent);
-                Ok(sudo)
-            }
-        }
+        // The cracktro always drives the real agent with the machine-readable
+        // protocol; `--demo` is handled by StubHack, never the agent.
+        agent_command(&self.host, self.sprint, self.dry_run, false, true)
     }
 
     /// Wait for v100-unlock to answer, and for its first word after that, so
@@ -151,6 +124,139 @@ fn explain(stderr: &str, place: &str) -> String {
     } else {
         format!("could not start v100-unlock on {place}: {}", protocol::clean(last))
     }
+}
+
+/// The agent a real (register-writing) run uses: `FBR_V100_AGENT` if the
+/// installer set it (a custom `--prefix`), else the standard installed
+/// location named by the sudoers rule.
+fn real_agent_path() -> String {
+    if let Ok(p) = std::env::var("FBR_V100_AGENT") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    AGENT.to_string()
+}
+
+/// The agent a simulated run uses: `FBR_V100_AGENT`, then the standard
+/// location, then next to this binary — the demo bundle ships both binaries
+/// together, so `--headless --demo` works straight from it.
+fn demo_agent_path() -> String {
+    if let Ok(p) = std::env::var("FBR_V100_AGENT") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    let installed = std::path::Path::new(AGENT);
+    if installed.exists() {
+        return AGENT.to_string();
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("v100-unlock");
+            if sibling.exists() {
+                return sibling.to_string_lossy().into_owned();
+            }
+        }
+    }
+    AGENT.to_string()
+}
+
+/// Build the command that runs the V100 agent, on this machine (via sudo) or
+/// on `host` over ssh. Shared by the cracktro (which reads the `--events`
+/// protocol) and `--headless` (which reads plain text).
+///
+/// `events` selects the machine-readable protocol; `demo` runs a simulated
+/// 4-card run instead of touching hardware.
+pub fn agent_command(
+    host: &Option<String>,
+    sprint: bool,
+    dry_run: bool,
+    demo: bool,
+    events: bool,
+) -> Result<Command, String> {
+    let mut args = vec!["apply"];
+    if events {
+        args.push("--events");
+    }
+    if sprint {
+        args.push("--sprint");
+    }
+    if dry_run {
+        args.push("--dry-run");
+    }
+    if demo {
+        args.push("--demo");
+    }
+    match host {
+        Some(host) if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) => {
+            Err(format!("{host:?} is not a host name"))
+        }
+        Some(host) => {
+            // On the remote, the agent is the installed one.
+            let mut ssh = Command::new("ssh");
+            // BatchMode: fail instead of prompting under the cracktro's screen.
+            // ServerAlive: notice a dead link within about 15 s instead of hanging.
+            ssh.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]);
+            ssh.args(["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]);
+            ssh.args(["--", host, "sudo", "-n"]);
+            ssh.arg(AGENT);
+            ssh.args(args);
+            Ok(ssh)
+        }
+        None if !cfg!(target_os = "linux") && !demo => {
+            Err("no V100 here: use --host to reach a V100 machine, or --demo".into())
+        }
+        None => {
+            // A simulated run touches no hardware and needs no root, so it runs
+            // the agent directly (the demo bundle ships it next to the binary).
+            // A real run writes the registers, so it goes through sudo to the
+            // installed, sudoers-named agent.
+            if demo {
+                let agent = demo_agent_path();
+                let mut direct = Command::new(&agent);
+                direct.args(args);
+                Ok(direct)
+            } else {
+                let agent = real_agent_path();
+                let mut sudo = Command::new("sudo");
+                sudo.arg(&agent);
+                sudo.args(args);
+                Ok(sudo)
+            }
+        }
+    }
+}
+
+/// `--headless`: run the V100 agent and stream its plain-text output to
+/// stdout, returning the agent's exit code. No terminal, no cracktro, no
+/// pacing — the same all-or-nothing run, for scripts and systemd.
+pub fn run_headless(
+    host: &Option<String>,
+    sprint: bool,
+    dry_run: bool,
+    demo: bool,
+) -> std::process::ExitCode {
+    let mut cmd = match agent_command(host, sprint, dry_run, demo, false) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            eprintln!("{e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    // Inherit the caller's stdin/stdout/stderr: the run streams live, and a
+    // closed stdin (Ctrl-C, a dropped pipe) still cancels it and puts the
+    // cards back, exactly as under the cracktro.
+    let status = match cmd.status() {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("could not start v100-unlock: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    // The agent's codes (0 at target, 2 untouched, 3 put back, 4 unknown)
+    // all fit a u8; anything else is clamped to 1.
+    std::process::ExitCode::from(status.code().unwrap_or(1).min(255) as u8)
 }
 
 /// Read v100-unlock's stdout on a thread; lines go to the channel.
@@ -436,5 +542,48 @@ mod tests {
             assert!(hack.command().is_err(), "{host:?}");
         }
         assert!(V100Hack::new(Some("c4130".into()), false, false, false).command().is_ok());
+    }
+
+    fn program_args(cmd: &Command) -> (String, Vec<String>) {
+        (
+            cmd.get_program().to_string_lossy().into_owned(),
+            cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect(),
+        )
+    }
+
+    #[test]
+    fn the_cracktro_drives_the_installed_agent_with_the_protocol() {
+        let (prog, args) = program_args(&agent_command(&None, false, false, false, true).unwrap());
+        assert_eq!(prog, "sudo");
+        assert_eq!(args, vec![AGENT, "apply", "--events"]);
+    }
+
+    #[test]
+    fn a_real_headless_run_goes_through_sudo_too() {
+        let (prog, args) = program_args(&agent_command(&None, true, true, false, false).unwrap());
+        assert_eq!(prog, "sudo");
+        assert_eq!(args, vec![AGENT, "apply", "--sprint", "--dry-run"]);
+    }
+
+    #[test]
+    fn a_simulated_headless_run_needs_no_sudo() {
+        let (prog, args) = program_args(&agent_command(&None, false, false, true, false).unwrap());
+        // No sudo: a simulated run touches no hardware. The agent is the
+        // installed one or the one next to this binary.
+        assert_ne!(prog, "sudo");
+        assert!(prog.ends_with("v100-unlock"), "{prog}");
+        assert_eq!(args, vec!["apply", "--demo"]);
+    }
+
+    #[test]
+    fn a_remote_run_reaches_the_installed_agent_over_ssh() {
+        let (prog, args) = program_args(&agent_command(&Some("c4130".into()), false, false, false, true).unwrap());
+        assert_eq!(prog, "ssh");
+        // ... -- c4130 sudo -n <agent> apply --events
+        let tail: Vec<&str> = args.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+        assert!(tail.contains(&"c4130"), "{tail:?}");
+        assert!(tail.contains(&"sudo"), "{tail:?}");
+        assert!(tail.contains(&AGENT), "{tail:?}");
+        assert!(tail.contains(&"--events"), "{tail:?}");
     }
 }

@@ -45,14 +45,15 @@ These are not preferences; they are the rules the whole design falls out of.
 | `src/canvas.rs` | ~293 | The 4-colour palettes, quantization/shimmer helpers, the background-contrast remap, the cell grid, and ANSI serialization |
 | `src/model_data.rs` | ~8800 | Generated mesh data for the three models (do not edit by hand) |
 | `src/hack.rs` | ~91 | The `Hack` trait, `HackState`, and the simulated `StubHack` |
-| `src/v100.rs` | ~440 | The real hack: runs `v100-unlock apply --events` as root (here or over ssh), paces its lines into the cracktro, and puts the cards back on any exit |
+| `src/v100.rs` | ~570 | The real hack: runs `v100-unlock apply --events` as root (here or over ssh), paces its lines into the cracktro, and puts the cards back on any exit. Also builds the agent command (`agent_command`) and the `--headless` plain-text run (`run_headless`) |
 | `src/music.rs` | ~180 | Optional looping background music (in-process via `rodio`), auto-detected (cwd or next to the binary) and toggled at runtime |
 | `v100-unlock/` | ~2400 | The root tool: survey / change / measure the HBM clock, all-or-nothing, with a simulator and a large test suite (see its `tests/`) |
 | `gen_models.py` | ~165 | Regenerates `model_data.rs` from the three sources in `models/` (weld, decimate, normalize) |
 | `make_gif.py` | ~106 | Renders dumped ANSI frames to an animated GIF (for previews) |
 | `demo.sh` | ~31 | One-command build + run (dev) |
-| `demo/` | — | Self-contained bundle: release binary + bundled audio stack (`lib/`) + music (`music/`) + `run.sh` launcher; runs with no system deps |
-| `flake.nix` / `flake.lock` | ~110 | Nix flake: dev shell (`nix develop`) and installable release package (`nix build .` / `nix run .`) |
+| `demo/` | — | Self-contained bundle: release binary + bundled audio stack (`lib/`) + music (`music/`) + the static `v100-unlock` agent + `run.sh` launcher; runs with no system deps |
+| `install.sh` | ~210 | One-command installer: puts `fbr-ram-downloader` on PATH, installs the static agent root-owned, writes the sudoers rule; `--prefix`, `--dry-run`, `--no-sudoers` |
+| `flake.nix` / `flake.lock` | ~150 | Nix flake: dev shell (`nix develop`) and two importable packages — `default` (the cracktro, built from source) and `agent` (the static `v100-unlock`) |
 
 Dependency direction is one-way and shallow:
 

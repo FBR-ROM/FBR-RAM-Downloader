@@ -1,9 +1,9 @@
 # FBR RAM Downloader NVIDIA
 
-A cack that runs a real overclock: it raises the
+A hack that runs a real overclock: it raises the
 HBM2 memory clock of every NVIDIA Tesla V100 in a machine, live, with no VBIOS
 flash and no reboot. `--demo` runs a
-simulated download so the cracktro can be demoed anywhere.
+simulated download so it can be demoed anywhere.
 
 How the cracktro is put together is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -69,14 +69,21 @@ so for it the daily clock is +30%).
 
 ## Running it
 
+One program, `fbr-ram-downloader`. The same command runs the interactive
+cracktro or the plain-text headless run; the flags pick which.
+
 ```sh
-fbr-ram-downloader --demo          # the simulated download (no hardware)
-fbr-ram-downloader                 # the real hack, on this machine
+fbr-ram-downloader                 # the real hack, interactive cracktro
+fbr-ram-downloader --demo          # the simulated download, interactive
+fbr-ram-downloader --headless      # the real hack, plain text (scripts, systemd)
+fbr-ram-downloader --headless --dry-run   # survey, write nothing
 fbr-ram-downloader --host c4130    # the real hack, on the V100 machine c4130, over ssh
-fbr-ram-downloader --dry-run       # survey and report, write nothing
 fbr-ram-downloader --sprint        # 1080 MHz instead of the daily 1053 MHz
 ```
 
+`--headless` runs the V100 agent and streams its plain text to stdout, returning
+the agent's own exit code (0 at target, 2 untouched, 3 put back, 4 unknown) —
+no terminal, no cracktro. It is the mode for scripts and a systemd unit.
 `--dry-run` is the safe first step: it surveys every card and reports exactly
 what a run would do — `877.5 → 1053.0 MHz · would change` per card — and writes
 nothing. It opens the cards read-only and takes no lock.
@@ -91,7 +98,8 @@ half-changed. If the link just goes silent, the cracktro says so within about
 
 | Flag | Effect |
 |------|--------|
-| `--demo` | The simulated download: no hardware |
+| `--demo` | The simulated download: no hardware, no root |
+| `--headless` | Run the V100 agent, stream its plain text, no cracktro |
 | `--host HOST` | Run the real hack on the V100 machine `HOST`, over ssh |
 | `--dry-run` | Survey and report, but write nothing |
 | `--sprint` | 1080 MHz instead of the daily 1053 MHz |
@@ -100,12 +108,12 @@ half-changed. If the link just goes silent, the cracktro says so within about
 | `--dark` / `--light` | Force the terminal theme instead of auto-detecting |
 | `--music FILE` | Play a specific track (else auto-detect `music/`) |
 | `--no-music` | Start with music off |
-| `--dump N [W H]` | Headless: print N frames to stdout |
+| `--dump N [W H]` | Print N frames to stdout (for verification / GIF) |
 | `--layout [W H]` | Print the computed layout for a size and exit (debug aid) |
 
-### The `v100-unlock` tool, on its own
+### The `v100-unlock` agent, on its own
 
-On the V100 machine, the agent is a normal CLI:
+The agent is a normal CLI, installed at `/usr/local/sbin/v100-unlock`:
 
 ```sh
 v100-unlock status                # every card's clock, measured (read-only)
@@ -121,59 +129,81 @@ progress (what the cracktro reads); `--simulate N` runs N simulated cards.
 
 ## Installing
 
-There are two artifacts, and they install differently:
-
-- **The V100 agent** (`v100-unlock`) — a **static** binary that runs as root on
-  the V100 machine. It has no system dependencies, so it runs on any Linux
-  distro. The V100 machine itself needs no Rust: build the binary anywhere and
-  copy it over.
-- **The cracktro** (`fbr-ram-downloader`) — the TUI. It needs a Rust toolchain
-  and the ALSA development library to build (the audio stack, `rodio` → `cpal`,
-  links against ALSA only — not PulseAudio).
-
-### The V100 agent (on the V100 machine, once)
-
-Build the static binary. The repo's `.cargo/config.toml` sets the musl target to
-link with `rust-lld` and `+crt-static`, so this one command produces a
-self-contained binary — no extra flags:
+One command. `install.sh` puts `fbr-ram-downloader` on your PATH, installs the
+static V100 agent root-owned, and writes the sudoers rule that lets your user
+run it as root. Everything it installs is self-contained — the cracktro ships
+its own glibc + ALSA (so it runs on any x86-64 Linux regardless of the system's
+glibc), and the agent is a static binary with no dependencies. No Rust, no
+Nix, no per-distro packages.
 
 ```sh
-rustup target add x86_64-unknown-linux-musl
-cargo build -p v100-unlock --release --target x86_64-unknown-linux-musl
+git clone https://github.com/FBR-ROM/FBR-RAM-Downloader
+cd FBR-RAM-Downloader
+./install.sh                 # installs to /usr/local (uses sudo if needed)
 ```
 
-(`rustup` is the same on every distro; see the table below if you don't have
-it. A C compiler is needed for the build scripts — `gcc`/`clang` — but the
-result is static and needs none at runtime.)
-
-Copy it to the V100 machine, install it root-owned, and let your user run
-exactly that binary as root:
+Then it is on your PATH:
 
 ```sh
-scp target/x86_64-unknown-linux-musl/release/v100-unlock c4130:
-ssh c4130
-sudo install -o root -g root -m 755 v100-unlock /usr/local/sbin/v100-unlock
-echo "$USER ALL=(root) NOPASSWD: /usr/local/sbin/v100-unlock" | sudo tee /etc/sudoers.d/v100-unlock
-sudo chmod 440 /etc/sudoers.d/v100-unlock
+fbr-ram-downloader --headless --dry-run   # survey the cards, write nothing
+fbr-ram-downloader                        # the real hack, interactive
 ```
 
-The cracktro calls `/usr/local/sbin/v100-unlock` by that exact path, and the
-sudoers rule names it, so the two have to agree.
+Options:
 
-### The cracktro
+```sh
+./install.sh --prefix /opt   # install to /opt instead of /usr/local
+./install.sh --dry-run       # show what would be done, change nothing
+./install.sh --no-sudoers    # skip the sudoers rule (manage sudo yourself)
+```
 
-**With Nix (recommended).** The repo ships a [Nix flake](flake.nix) that builds
-the cracktro reproducibly — pinned [nixpkgs](flake.lock) and the committed
-`Cargo.lock` (exact crate versions + hashes) — so the build is identical on
-every machine and the sandboxed build needs no network:
+The installer is idempotent — re-run it to update. A non-root user without
+passwordless sudo can still install the cracktro to a writable prefix
+(`./install.sh --prefix ~/.local`); the agent and sudoers rule are skipped with
+the exact commands to add them as root.
+
+### With Nix
+
+The repo is a [Nix flake](flake.nix) that builds the cracktro reproducibly
+(pinned [nixpkgs](flake.lock) + the committed `Cargo.lock`) and packages the
+static agent. Build, run, or install it directly:
 
 ```sh
 nix build .             # -> result/bin/fbr-ram-downloader
-nix run .               # run it directly
-nix profile install .   # install into your nix profile
+nix build .#agent       # -> result/bin/v100-unlock
+nix run .               # run the cracktro directly
+nix profile install .   # install the cracktro into your nix profile
 ```
 
-**Without Nix.** Install a Rust toolchain and the ALSA development library, then
+Or import it from your own flake:
+
+```nix
+inputs.fbr.url = "github:FBR-ROM/FBR-RAM-Downloader";
+
+environment.systemPackages = [
+  inputs.fbr.packages.${system}.default   # the cracktro
+  inputs.fbr.packages.${system}.agent     # the root tool (Linux)
+];
+```
+
+### Without the installer
+
+The committed `demo/` bundle is the same self-contained files the installer
+copies, so it runs straight from the checkout:
+
+```sh
+./demo/run.sh            # interactive (press q to quit)
+./demo/run.sh --dump 60  # print 60 frames to stdout
+```
+
+`run.sh` invokes the bundled glibc loader with `--library-path demo/lib`, so the
+binary and its audio stack resolve from the bundle — no system dependencies.
+
+## Building from source
+
+Only needed if you want to change the code. The cracktro links against ALSA
+only (the audio stack, `rodio` → `cpal`, not PulseAudio); the agent is static.
+Install a Rust toolchain and the ALSA development library, then
 `cargo build --release`. The exact packages per distro:
 
 | Distro | Rust | ALSA dev | pkg-config |
@@ -193,6 +223,15 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 # + the distro's ALSA dev package from the table above
 cargo build --release
+```
+
+To rebuild the static agent, the repo's `.cargo/config.toml` sets the musl
+target to link with `rust-lld` and `+crt-static`, so this one command produces
+a self-contained binary:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+cargo build -p v100-unlock --release --target x86_64-unknown-linux-musl
 ```
 
 The cracktro is a normal dynamically-linked binary; at runtime it needs the ALSA
@@ -230,11 +269,13 @@ hardware is never left half-changed; see
 ### Rebuilding the demo bundle
 
 `demo/` is committed so the quick start works without a build. After a code
-change, refresh it:
+change, refresh both binaries:
 
 ```sh
 cargo build --release
 cp target/release/fbr-ram-downloader demo/
+cargo build -p v100-unlock --release --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release/v100-unlock demo/
 ```
 
 The shared libraries in `demo/lib/` (glibc loader, `libc`, `libm`, `libgcc_s`,
