@@ -52,7 +52,7 @@ portable; a PR to expand the tool is welcome.
 
 Happy cracking.
 
-— FBR ROM
+<3 FBR ROM
 
 ## The numbers
 
