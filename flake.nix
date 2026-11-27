@@ -84,7 +84,7 @@
 
       meta = {
         description = "Game Boy DMG/MGB-styled cracktro TUI for the FBR RAM-unlock hack";
-        license = pkgs.lib.licenses.unlicense;
+        license = pkgs.lib.licenses.mit;
         platforms = systems;
         mainProgram = "fbr-ram-downloader";
       };
@@ -103,7 +103,7 @@
 
       meta = {
         description = "Root tool that raises the HBM memory clock of every Tesla V100";
-        license = pkgs.lib.licenses.unlicense;
+        license = pkgs.lib.licenses.mit;
         platforms = [ "x86_64-linux" "aarch64-linux" ];
         mainProgram = "v100-unlock";
       };

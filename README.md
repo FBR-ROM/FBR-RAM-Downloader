@@ -175,4 +175,4 @@ Sydney, Australia
 
 ## License
 
-Public domain under the [Unlicense](LICENSE).
+MIT — see [LICENSE](LICENSE). Derivative-work attributions: see [NOTICE](NOTICE).

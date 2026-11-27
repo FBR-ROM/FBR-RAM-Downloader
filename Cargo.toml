@@ -3,7 +3,7 @@ name = "fbr-ram-downloader"
 version = "0.1.2"
 edition = "2021"
 description = "Live HBM2 memory clock unlock for NVIDIA Tesla V100 wrapped in a 4-color Game Boy cracktro"
-license = "Unlicense"
+license = "MIT"
 repository = "https://github.com/FBR-ROM/FBR-RAM-Downloader"
 readme = "README.md"
 
