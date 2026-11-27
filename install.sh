@@ -8,10 +8,11 @@
 # x86-64 Linux regardless of the system's glibc), and the agent is a static
 # binary with no dependencies.
 #
-#   ./install.sh                 # install to /usr/local (uses sudo if needed)
-#   ./install.sh --prefix /opt   # install to /opt instead
+#   sudo ./install.sh            # install to /usr/local
+#   sudo ./install.sh --prefix /opt   # install to /opt instead
+#   sudo ./install.sh --user arikami  # grant the sudoers rule to arikami
 #   ./install.sh --dry-run       # show what would be done, change nothing
-#   ./install.sh --no-sudoers    # skip the sudoers rule (manage sudo yourself)
+#   sudo ./install.sh --no-sudoers    # skip the sudoers rule (manage sudo yourself)
 #
 # What it installs (under $PREFIX, default /usr/local):
 #   bin/fbr-ram-downloader        the launcher, on your PATH
@@ -19,9 +20,9 @@
 #   sbin/v100-unlock              the static V100 agent (root-owned)
 #   /etc/sudoers.d/fbr-ram-downloader   lets your user run the agent as root
 #
-# The cracktro + launcher only need write access to $PREFIX, so a non-root
-# user can install them to a writable prefix (e.g. ~/.local). The agent and
-# the sudoers rule need root; without root they are skipped with a warning.
+# Root is required: the agent is installed root-owned and the sudoers rule
+# lives in /etc/sudoers.d. Run it as root, or as a user with passwordless
+# sudo (the script escalates with `sudo -n` and never prompts).
 #
 # After install:
 #   fbr-ram-downloader                 the real hack, interactive
@@ -39,12 +40,16 @@ BUNDLE="$ROOT/demo"
 PREFIX="/usr/local"
 DRY_RUN=0
 NO_SUDOERS=0
+RUN_USER=""
 
 # --- args --------------------------------------------------------------------
+ORIG_ARGS="$*"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --prefix)    PREFIX="${2:?--prefix needs a path}"; shift 2 ;;
     --prefix=*)  PREFIX="${1#--prefix=}"; shift ;;
+    --user)      RUN_USER="${2:?--user needs a name}"; shift 2 ;;
+    --user=*)    RUN_USER="${1#--user=}"; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
     --no-sudoers) NO_SUDOERS=1; shift ;;
     -h|--help)   grep '^# ' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -76,23 +81,34 @@ done
 [[ $missing -eq 0 ]] || exit 1
 
 # --- privilege ---------------------------------------------------------------
-# Root needs no escalation. A non-root user uses sudo only when it works
-# without a password (so the install never hangs on a prompt); otherwise a
-# writable prefix still gets the cracktro + launcher (the agent and sudoers
-# rule are skipped with a warning).
-IS_ROOT=0
+# Root is required to install: the agent is installed root-owned and the
+# sudoers rule lives in /etc/sudoers.d. Run as root, or as a user with
+# passwordless sudo (the script escalates with `sudo -n` and never prompts).
+# --dry-run changes nothing, so it is allowed without root.
 SUDO=""
 if [[ $EUID -eq 0 ]]; then
-  IS_ROOT=1
+  :
 elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
   SUDO="sudo"
+elif [[ $DRY_RUN -eq 1 ]]; then
+  :   # preview only; nothing is written
+else
+  echo "error: this install needs root (the agent is root-owned and the" >&2
+  echo "       sudoers rule lives in /etc/sudoers.d)." >&2
+  echo "       re-run as:  sudo $0 $ORIG_ARGS" >&2
+  exit 1
 fi
-# The user who will run the cracktro (for the sudoers rule).
-RUN_USER="${SUDO_USER:-$(id -un)}"
-[[ "$RUN_USER" == "root" ]] && RUN_USER="$(id -un)"
-
-# Can the current user write to $PREFIX without escalation?
-prefix_writable() { [[ -d "$PREFIX" && -w "$PREFIX" ]] || [[ -w "$(dirname "$PREFIX")" ]]; }
+# The user who will run the cracktro (for the sudoers rule): --user if given,
+# else the user who invoked sudo ($SUDO_USER), else the current user.
+if [[ -z "$RUN_USER" ]]; then
+  RUN_USER="${SUDO_USER:-$(id -un)}"
+fi
+# A sudoers rule that grants root is useless; require a non-root user.
+if [[ $NO_SUDOERS -eq 0 && "$RUN_USER" == "root" ]]; then
+  echo "error: the sudoers rule needs a non-root user to grant." >&2
+  echo "       re-run with:  sudo $0 $ORIG_ARGS --user <name>" >&2
+  exit 1
+fi
 
 # --- helpers -----------------------------------------------------------------
 say()  { printf '%s\n' "$*"; }
@@ -114,13 +130,6 @@ say "  agent:     $AGENT_DEST"
 say "  sudoers:   $SUDOERS_FILE  (user: $RUN_USER)  $([[ $NO_SUDOERS -eq 1 ]] && echo '[skipped]')"
 say "  source:    $BUNDLE"
 [[ $DRY_RUN -eq 1 ]] && { say ""; say "(dry run: nothing will be changed)"; exit 0; }
-
-# A non-root user without sudo can only install to a writable prefix.
-if [[ $IS_ROOT -eq 0 && -z "$SUDO" ]] && ! prefix_writable; then
-  echo "error: $PREFIX is not writable and sudo is not available." >&2
-  echo "       re-run as root, or use --prefix to a writable location (e.g. ~/.local)." >&2
-  exit 1
-fi
 
 # --- 1. the cracktro bundle --------------------------------------------------
 step "Installing the cracktro (self-contained: bundled glibc + ALSA)"
@@ -149,66 +158,45 @@ if [[ $DRY_RUN -eq 0 ]]; then
   $SUDO chmod 755 "$BIN_LINK"
 fi
 
-# --- 3. the static V100 agent (needs root) -----------------------------------
-if [[ $IS_ROOT -eq 1 || -n "$SUDO" ]]; then
-  step "Installing the V100 agent (static, root-owned)"
-  run $SUDO mkdir -p "$PREFIX/sbin"
-  run $SUDO install -o root -g root -m 755 "$SRC_AGENT" "$AGENT_DEST"
-else
-  step "Skipping the V100 agent (needs root)"
-  say "  install it later as root:"
-  say "    sudo install -o root -g root -m 755 $SRC_AGENT $AGENT_DEST"
-fi
+# --- 3. the static V100 agent ------------------------------------------------
+step "Installing the V100 agent (static, root-owned)"
+run $SUDO mkdir -p "$PREFIX/sbin"
+run $SUDO install -o root -g root -m 755 "$SRC_AGENT" "$AGENT_DEST"
 
-# --- 4. the sudoers rule (needs root) ----------------------------------------
+# --- 4. the sudoers rule -----------------------------------------------------
 if [[ $NO_SUDOERS -eq 0 ]]; then
-  if [[ $IS_ROOT -eq 1 || -n "$SUDO" ]]; then
-    step "Installing the sudoers rule (lets $RUN_USER run the agent as root)"
-    RULE="$RUN_USER ALL=(root) NOPASSWD: $AGENT_DEST"
-    if [[ $DRY_RUN -eq 0 ]]; then
-      # Write to a temp file, validate it, then move it in — never leave a
-      # broken sudoers file behind.
-      TMP="$($SUDO mktemp /etc/sudoers.d/.fbr.XXXXXX 2>/dev/null || mktemp)"
-      printf '%s\n' "$RULE" > "$TMP"
-      if command -v visudo >/dev/null 2>&1; then
-        if ! visudo -cf "$TMP" >/dev/null 2>&1; then
-          rm -f "$TMP"
-          echo "error: the generated sudoers rule failed validation; not installed." >&2
-          exit 1
-        fi
+  step "Installing the sudoers rule (lets $RUN_USER run the agent as root)"
+  RULE="$RUN_USER ALL=(root) NOPASSWD: $AGENT_DEST"
+  if [[ $DRY_RUN -eq 0 ]]; then
+    # Write to a temp file, validate it, then move it in — never leave a
+    # broken sudoers file behind.
+    run $SUDO mkdir -p /etc/sudoers.d
+    TMP="$($SUDO mktemp /etc/sudoers.d/.fbr.XXXXXX 2>/dev/null || mktemp)"
+    printf '%s\n' "$RULE" > "$TMP"
+    if command -v visudo >/dev/null 2>&1; then
+      if ! visudo -cf "$TMP" >/dev/null 2>&1; then
+        rm -f "$TMP"
+        echo "error: the generated sudoers rule failed validation; not installed." >&2
+        exit 1
       fi
-      $SUDO install -m 440 -o root -g root "$TMP" "$SUDOERS_FILE"
-      rm -f "$TMP"
-    else
-      printf '  [dry-run] sudoers rule: %s\n' "$RULE"
     fi
+    $SUDO install -m 440 -o root -g root "$TMP" "$SUDOERS_FILE"
+    rm -f "$TMP"
   else
-    step "Skipping the sudoers rule (needs root)"
-    say "  add it later as root:"
-    say "    echo '$RUN_USER ALL=(root) NOPASSWD: $AGENT_DEST' | sudo tee /etc/sudoers.d/fbr-ram-downloader"
+    printf '  [dry-run] sudoers rule: %s\n' "$RULE"
   fi
 fi
 
 # --- 5. verify ---------------------------------------------------------------
 step "Verifying"
 if [[ $DRY_RUN -eq 0 ]]; then
-  if [[ -x "$AGENT_DEST" ]]; then
-    # A simulated headless run needs no root and no hardware: it proves the
-    # launcher, the bundled libraries, and the agent all work together.
-    if "$BIN_LINK" --headless --demo >/dev/null 2>&1; then
-      say "  ok: fbr-ram-downloader --headless --demo ran cleanly"
-    else
-      say "  warning: verification run failed; check the install." >&2
-      exit 1
-    fi
+  # A simulated headless run needs no root and no hardware: it proves the
+  # launcher, the bundled libraries, and the agent all work together.
+  if "$BIN_LINK" --headless --demo >/dev/null 2>&1; then
+    say "  ok: fbr-ram-downloader --headless --demo ran cleanly"
   else
-    # No agent (skipped, no root): verify the cracktro itself runs.
-    if "$BIN_LINK" --dump 1 80 24 >/dev/null 2>&1; then
-      say "  ok: fbr-ram-downloader runs (agent not installed; add it as root for the real hack)"
-    else
-      say "  warning: the cracktro did not run; check the install." >&2
-      exit 1
-    fi
+    say "  warning: verification run failed; check the install." >&2
+    exit 1
   fi
 fi
 

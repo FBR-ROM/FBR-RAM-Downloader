@@ -136,10 +136,14 @@ its own glibc + ALSA (so it runs on any x86-64 Linux regardless of the system's
 glibc), and the agent is a static binary with no dependencies. No Rust, no
 Nix, no per-distro packages.
 
+**Root is required** — the agent is installed root-owned and the sudoers rule
+lives in `/etc/sudoers.d`. Run it as root, or as a user with passwordless sudo
+(the script escalates with `sudo -n` and never prompts):
+
 ```sh
 git clone https://github.com/FBR-ROM/FBR-RAM-Downloader
 cd FBR-RAM-Downloader
-./install.sh                 # installs to /usr/local (uses sudo if needed)
+sudo ./install.sh            # installs to /usr/local
 ```
 
 Then it is on your PATH:
@@ -152,15 +156,13 @@ fbr-ram-downloader                        # the real hack, interactive
 Options:
 
 ```sh
-./install.sh --prefix /opt   # install to /opt instead of /usr/local
-./install.sh --dry-run       # show what would be done, change nothing
-./install.sh --no-sudoers    # skip the sudoers rule (manage sudo yourself)
+sudo ./install.sh --prefix /opt   # install to /opt instead of /usr/local
+sudo ./install.sh --user arikami  # grant the sudoers rule to arikami
+./install.sh --dry-run            # show what would be done, change nothing (no root needed)
+sudo ./install.sh --no-sudoers    # skip the sudoers rule (manage sudo yourself)
 ```
 
-The installer is idempotent — re-run it to update. A non-root user without
-passwordless sudo can still install the cracktro to a writable prefix
-(`./install.sh --prefix ~/.local`); the agent and sudoers rule are skipped with
-the exact commands to add them as root.
+The installer is idempotent — re-run it to update.
 
 ### With Nix
 

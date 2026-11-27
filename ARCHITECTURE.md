@@ -52,7 +52,7 @@ These are not preferences; they are the rules the whole design falls out of.
 | `make_gif.py` | ~106 | Renders dumped ANSI frames to an animated GIF (for previews) |
 | `demo.sh` | ~31 | One-command build + run (dev) |
 | `demo/` | — | Self-contained bundle: release binary + bundled audio stack (`lib/`) + music (`music/`) + the static `v100-unlock` agent + `run.sh` launcher; runs with no system deps |
-| `install.sh` | ~210 | One-command installer: puts `fbr-ram-downloader` on PATH, installs the static agent root-owned, writes the sudoers rule; `--prefix`, `--dry-run`, `--no-sudoers` |
+| `install.sh` | ~210 | One-command installer (root required): puts `fbr-ram-downloader` on PATH, installs the static agent root-owned, writes the sudoers rule; `--prefix`, `--user`, `--dry-run`, `--no-sudoers` |
 | `flake.nix` / `flake.lock` | ~150 | Nix flake: dev shell (`nix develop`) and two importable packages — `default` (the cracktro, built from source) and `agent` (the static `v100-unlock`) |
 
 Dependency direction is one-way and shallow:
