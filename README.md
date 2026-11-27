@@ -1,6 +1,6 @@
 # FBR RAM Downloader NVIDIA
 
-Live HBM2 memory clock unlock for every NVIDIA Tesla V100 in a machine — no VBIOS flash, no driver reload, no reboot — wrapped in a 4-color Game Boy cracktro, with a `--headless` mode for scripts and systemd.
+Live HBM2 memory clock unlock for every NVIDIA Tesla V100 in a machine — no VBIOS flash, no driver reload, no reboot — wrapped in a 4-color cracktro, with a `--headless` mode for scripts and systemd.
 
 ![FBR RAM Downloader](preview.gif)
 
