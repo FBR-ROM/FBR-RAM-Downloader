@@ -50,11 +50,10 @@ const BAR_WIDTH: usize = 44;
 /// entries with "  \u{2022}  " (or anything you like). Keep it one line.
 pub const GREETINGS: &str = "  MUSIC: \"ARCANE MAGIC\"  \u{2022}  CREDITS:  \u{2022}  AMOGH MUNIKOTE  \u{2022}  ASM64 HOOLIGAN  \u{2022}  CACHENETICS  \u{2022}  DUGGASCO  \u{2022}  FBR ROM  \u{2022}  ALL THE RAM HUNTERS  \u{2022}  SHOUTOUTS:  \u{2022}  HELIX COLLECTIVE  \u{2022}  NOUS RESEARCH  \u{2022}  ETH STRAT  \u{2022}  AMP CODE  \u{2022}  JENSEN HUANG  \u{2022}  NVIDIA  \u{2022}  FRANCK (TP ART)  \u{2022}  ONSLAUGHT  \u{2022}  DEFAME  \u{2022}  GINA  \u{2022}  ZIGGY  \u{2022}  ROB  \u{2022}  GARY  \u{2022}  JEEVA  \u{2022}  DNV  \u{2022}  ";
 
-/// Model size breakpoints in cells, largest first: `(width, rows)`. Pixels are
-/// one per cell and cells are ~1:2, so a square model spans twice as many
-/// columns as rows. The layout picks the largest breakpoint that fits both the
-/// available width and the available rows, so the model is always fully in
-/// view and never bleeds over the border or into the loader.
+/// Model height breakpoints in cells, largest first: `(ref_width, rows)`.
+/// The model region spans the full inner width (`1..w-1`) so wide models
+/// (v100, P5000) extend to the inner edges without clipping, while the height
+/// is picked from the largest breakpoint that fits `region_h`.
 pub const MODEL_BREAKPOINTS: &[(usize, usize)] = &[
     (56, 28),
     (48, 24),
@@ -121,18 +120,17 @@ const BREATH_ROWS: usize = 1;
 ///   region       rows region_top ..= region_bottom
 ///                  region_top    = 1
 ///                  region_bottom = h - 1 - BREATH_ROWS - LOADER_ROWS
-///   model        largest breakpoint (mw, mh) with
-///                  mw <= w - 4   and   mh <= region_h
-///                placed at x = (w - mw) / 2   (exact horizontal centering)
-///                          y = region_top + (region_h - mh) * MODEL_V_BIAS
+///   model        largest breakpoint (_, mh) with mh <= region_h
+///                region spans full inner width: model_x = 1, model_w = w - 2
+///                (Scene::render centers the 3D projection inside model_w)
+///                placed at y = region_top + (region_h - mh) * MODEL_V_BIAS
 /// ```
 ///
-/// `x = (w - mw) / 2` is exact centering in the frame: the leftover space
-/// `w - mw` is split into a left margin of `(w - mw) / 2` and a right margin of
-/// `w - mw - (w - mw) / 2`, which differ by at most one cell.
-///
-/// Vertically the model is biased below centre by `MODEL_V_BIAS` and clamped
-/// into the region, so it can never reach the top border or the loader.
+/// Horizontally the model frame spans the full inner area (`col 1..w-2`), with
+/// left/right margins of 1 cell each; `Scene::render` centers the projected 3D
+/// mesh within `model_w`. Vertically the model is biased below centre by
+/// `MODEL_V_BIAS` and clamped into the region, so it can never reach the top
+/// border or the loader.
 ///
 /// Pure function of the size: unit-tested below and printable with `--layout`.
 pub fn layout(w: usize, h: usize) -> Layout {
@@ -141,15 +139,19 @@ pub fn layout(w: usize, h: usize) -> Layout {
 
     // --- bottom loader block, anchored to the scroller ---------------------
     let scroller_row = h - 1;
-    let label_row = h - 1 - BREATH_ROWS - LOADER_ROWS; // h - 5
-    let bar_row = label_row + 1;
-    let status_row = label_row + 2;
+    let label_row = h.saturating_sub(1 + BREATH_ROWS + LOADER_ROWS).max(1);
+    let bar_row = (label_row + 1).min(h - 2);
+    let status_row = (label_row + 2).min(h - 2);
 
     // --- model region, between the top border and the loader --------------
     // (h >= 3 here, so the region always has at least one row.)
     let region_top = 1;
     let region_bottom = label_row.saturating_sub(1).max(region_top);
-    let region_h = region_bottom - region_top + 1;
+    let region_h = if label_row > region_top {
+        region_bottom - region_top + 1
+    } else {
+        0
+    };
 
     // --- model frame: full inner width, height from the largest breakpoint
     //     that fits the region. The v100/P5000 are scaled up to match the FBR
@@ -306,6 +308,139 @@ mod tests {
                 l.label_row
             );
         }
+    }
+
+    /// 250+ size layout and rendered-frame invariant sweep: verifies corners,
+    /// side borders, strict 4-color foreground-only rendering, and no panics
+    /// across tiny, medium, and huge terminal dimensions.
+    #[test]
+    fn sweep_250_sizes_preserves_outer_frame_and_four_color_rule() {
+        use crate::scene::Scene;
+
+        let widths: &[usize] = &[
+            3, 4, 5, 8, 10, 12, 16, 19, 20, 24, 30, 40, 46, 50, 60, 70, 79, 80, 81, 100, 120, 160,
+            200, 240,
+        ];
+        let heights: &[usize] = &[3, 4, 5, 6, 8, 10, 14, 20, 23, 24, 30, 40, 60, 95, 120];
+        let pal = Palette::green();
+
+        let states = [
+            HackState {
+                progress: 0.0,
+                status: "connecting".into(),
+                done: false,
+                error: None,
+                done_message: None,
+            },
+            HackState {
+                progress: 0.5,
+                status: "card 2/4 · 05:00.0 · 1053.0 MHz · locked in 0.1 ms".into(),
+                done: false,
+                error: None,
+                done_message: None,
+            },
+            HackState {
+                progress: 1.0,
+                status: "error".into(),
+                done: false,
+                error: Some("rolled back: memory PLLs did not lock".into()),
+                done_message: None,
+            },
+        ];
+
+        let mut checked = 0usize;
+        for &w in widths {
+            for &h in heights {
+                let l = layout(w, h);
+                if l.model_w > 0 {
+                    assert!(l.model_x >= 1 && l.model_x + l.model_w <= w - 1);
+                    assert!(l.model_y >= 1 && l.model_y + l.model_h <= h - 1);
+                    assert!(l.model_y + l.model_h <= l.label_row);
+                }
+                let mut scene = Scene::new(l.model_w, l.model_h);
+                scene.advance(0.2);
+                let frame = scene.render();
+                let mut ui = Cracktro::new(w, h, pal);
+                for st in &states {
+                    let cv = ui.render(0.033, &frame, st, w, h);
+                    assert_eq!(cv.cells[0].ch, '┌', "{w}x{h}: top-left corner");
+                    assert_eq!(cv.cells[w - 1].ch, '┐', "{w}x{h}: top-right corner");
+                    assert_eq!(cv.cells[(h - 1) * w].ch, '└', "{w}x{h}: bottom-left corner");
+                    assert_eq!(
+                        cv.cells[(h - 1) * w + (w - 1)].ch,
+                        '┘',
+                        "{w}x{h}: bottom-right corner"
+                    );
+                    for y in 1..h - 1 {
+                        assert_eq!(cv.cells[y * w].ch, '│', "{w}x{h} row {y}: left border");
+                        assert_eq!(
+                            cv.cells[y * w + (w - 1)].ch,
+                            '│',
+                            "{w}x{h} row {y}: right border"
+                        );
+                    }
+                    for cell in &cv.cells {
+                        if cell.ch != ' ' {
+                            assert!(
+                                pal.colors.contains(&cell.fg),
+                                "{w}x{h}: non-palette color {:?}",
+                                cell.fg
+                            );
+                        }
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 250, "expected >=250 sizes, got {checked}");
+    }
+
+    #[test]
+    fn dither_char_covers_all_four_density_levels() {
+        let mut seen = std::collections::HashSet::new();
+        for step in 0..=20 {
+            let b = step as f32 / 20.0;
+            for y in 0..4 {
+                for x in 0..4 {
+                    let c = dither_char(b, x, y);
+                    assert!(DITHER.contains(&c));
+                    seen.insert(c);
+                }
+            }
+        }
+        assert_eq!(seen.len(), 4);
+    }
+
+    #[test]
+    fn celebration_snapshots_falls_shows_done_message_and_handles_resize() {
+        use crate::scene::Scene;
+
+        let pal = Palette::green();
+        let scene = Scene::new(78, 16);
+        let frame = scene.render();
+        let mut ui = Cracktro::new(80, 24, pal);
+        let done_state = HackState {
+            progress: 1.0,
+            status: "dry run: nothing written".into(),
+            done: true,
+            error: None,
+            done_message: Some("DRY RUN OK".into()),
+        };
+
+        // First render on done takes the snapshot.
+        let snap = ui.render(0.033, &frame, &done_state, 80, 24);
+        assert_eq!(snap.cells[0].ch, '┌');
+
+        // Advance past clear_time() with a terminal resize mid-celebration.
+        let mut last = snap;
+        for _ in 0..100 {
+            last = ui.render(0.05, &frame, &done_state, 60, 20);
+        }
+        let mid_row: String = (0..60).map(|x| last.cells[10 * 60 + x].ch).collect();
+        assert!(
+            mid_row.contains("DRY RUN OK"),
+            "expected done_message in center row, got {mid_row:?}"
+        );
     }
 }
 
@@ -525,11 +660,14 @@ impl Cracktro {
     fn border_text(&self, cv: &mut Canvas, lay: &Layout, w: usize, h: usize, t: f32) {
         let p = self.palette;
 
-        // Title, centered, color-cycled per character.
+        // Title, centered, color-cycled per character, clipped to the inner
+        // width so it never overwrites the corners on narrow terminals.
         let title = "CRACKED BY FBR ROM";
-        let tw = title.chars().count();
+        let inner_w = w.saturating_sub(2);
+        let clipped: String = title.chars().take(inner_w).collect();
+        let tw = clipped.chars().count();
         let start = cv.inner_center(tw);
-        for (i, c) in title.chars().enumerate() {
+        for (i, c) in clipped.chars().enumerate() {
             let ccol = p.cycle_shade(1.0, t, i as f32 * 0.05);
             cv.set(start + i, 0, c, ccol, true);
         }
@@ -580,8 +718,12 @@ impl Cracktro {
     /// message.
     fn loader(&self, cv: &mut Canvas, lay: &Layout, state: &HackState, t: f32, w: usize) {
         let p = self.palette;
-        cv.text_center_inner(lay.label_row, "DOWNLOADING RAM", p.colors[2], true);
-        self.bar(cv, lay.bar_row, state, t);
+        if cv.h >= 5 {
+            cv.text_center_inner(lay.label_row, "DOWNLOADING RAM", p.colors[2], true);
+        }
+        if cv.h >= 4 {
+            self.bar(cv, lay.bar_row, state, t);
+        }
 
         let inner_w = w.saturating_sub(2);
         let (status, status_col, status_bold) = if let Some(err) = &state.error {
@@ -634,12 +776,24 @@ impl Cracktro {
         let p = self.palette;
         let base = p.colors[2];
         let shine = p.colors[1];
-        // Bar width adapts to the inner area so it never touches the border.
-        let bar_w = (BAR_WIDTH as i32).min((cv.w.saturating_sub(12)) as i32).max(8) as usize;
-        let filled = (state.progress * bar_w as f32).round() as usize;
+        let inner_w = cv.w.saturating_sub(2);
+        if inner_w == 0 {
+            return;
+        }
         let pct = (state.progress * 100.0).round() as usize;
         let pct_s = format!("  {}%", pct);
-        let total = 2 + bar_w + pct_s.chars().count();
+        let pct_len = pct_s.chars().count();
+        // Need room for `[`, at least 1 bar cell, `]`, and `pct_s` inside the
+        // inner area; on ultra-narrow terminals, show only the percentage.
+        if inner_w < 3 + pct_len {
+            cv.text_center_inner(row, pct_s.trim(), base, true);
+            return;
+        }
+        // Bar width adapts to the inner area so it never touches the border.
+        let max_bar = inner_w - 2 - pct_len;
+        let bar_w = BAR_WIDTH.min(max_bar).max(1);
+        let filled = (state.progress * bar_w as f32).round() as usize;
+        let total = 2 + bar_w + pct_len;
         let start = cv.inner_center(total);
 
         // The shimmer: a soft band of dithered shades that travels the whole

@@ -1,10 +1,38 @@
 #!/usr/bin/env python3
-"""Render the dumped truecolor TUI frames to an animated GIF (M+ Nerd Font Mono)."""
-import re, sys
+"""Render dumped truecolor TUI frames to an animated GIF."""
+import os, re, shutil, subprocess, sys
 from PIL import Image, ImageDraw, ImageFont
 
-FONT = "/nix/store/zrbky24b568vx4filjjnk0i6xflnviay-nerd-fonts-m+-3.5.0+1.100/share/fonts/truetype/NerdFonts/M+/M+CodeLat60NerdFontMono-Regular.ttf"
 BG = (0, 0, 0)
+
+def resolve_font(explicit=None):
+    """Find a monospace TrueType font: explicit/--font, FBR_FONT, fc-match, or common paths."""
+    candidates = []
+    if explicit:
+        candidates.append(explicit)
+    if os.environ.get("FBR_FONT"):
+        candidates.append(os.environ["FBR_FONT"])
+    if shutil.which("fc-match"):
+        for pattern in ("M+CodeLat60 Nerd Font Mono", "DejaVu Sans Mono", "monospace"):
+            try:
+                out = subprocess.check_output(
+                    ["fc-match", "-f", "%{file}", pattern],
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                ).strip()
+                if out:
+                    candidates.append(out)
+            except Exception:
+                pass
+    candidates.extend([
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        "/System/Library/Fonts/Menlo.ttc",
+    ])
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    raise SystemExit("error: no monospace font found; pass --font PATH or set FBR_FONT")
 
 def load_frames(path):
     with open(path) as f:
@@ -82,10 +110,16 @@ def render_frame(grid, font, cw, ch):
     return img
 
 def main():
-    frames_text = load_frames(sys.argv[1])
-    step = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+    args = sys.argv[1:]
+    explicit_font = None
+    if "--font" in args:
+        idx = args.index("--font")
+        explicit_font = args[idx + 1]
+        del args[idx:idx + 2]
+    frames_text = load_frames(args[0])
+    step = int(args[1]) if len(args) > 1 else 2
     frames_text = frames_text[::step]
-    font = ImageFont.truetype(FONT, 16)
+    font = ImageFont.truetype(resolve_font(explicit_font), 16)
     cw, ch = measure(font)
     imgs = []
     for f in frames_text:
@@ -98,7 +132,7 @@ def main():
         canvas = Image.new("RGB", (W, H), BG)
         canvas.paste(i, (0, 0))
         norm.append(canvas)
-    out = sys.argv[3] if len(sys.argv) > 3 else "preview.gif"
+    out = args[2] if len(args) > 2 else "preview.gif"
     norm[0].save(out, save_all=True, append_images=norm[1:], duration=60, loop=0, optimize=True)
     print(f"wrote {out}: {len(norm)} frames, {W}x{H}, cell {cw}x{ch}")
 

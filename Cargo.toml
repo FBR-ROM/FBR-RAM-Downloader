@@ -1,8 +1,11 @@
 [package]
 name = "fbr-ram-downloader"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-description = "FBR RAM downloader TUI with a 3D spinning logo"
+description = "Live HBM2 memory clock unlock for NVIDIA Tesla V100 wrapped in a 4-color Game Boy cracktro"
+license = "Unlicense"
+repository = "https://github.com/FBR-ROM/FBR-RAM-Downloader"
+readme = "README.md"
 
 [dependencies]
 crossterm = "0.28"

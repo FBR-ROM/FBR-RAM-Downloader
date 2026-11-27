@@ -576,6 +576,57 @@ mod tests {
         assert!(maxx - minx > 0.5, "stars collapsed: x spread {}", maxx - minx);
         assert!(maxy - miny > 0.5, "stars collapsed: y spread {}", maxy - miny);
     }
+
+    #[test]
+    fn embedded_meshes_are_valid_and_finite() {
+        for (idx, m) in MODELS.iter().enumerate() {
+            assert!(!m.verts.is_empty(), "model {idx} has no verts");
+            assert!(!m.faces.is_empty(), "model {idx} has no faces");
+            assert!(m.scale.is_finite() && m.scale > 0.0, "model {idx} bad scale");
+            for &(x, y, z) in m.verts {
+                assert!(x.is_finite() && y.is_finite() && z.is_finite());
+            }
+            for &(a, b, c) in m.faces {
+                assert!(a < m.verts.len() && b < m.verts.len() && c < m.verts.len());
+            }
+        }
+    }
+
+    #[test]
+    fn model_cycles_on_auto_spin_but_not_on_mouse_drag_or_flick() {
+        let mut s = Scene::new(40, 20);
+        assert_eq!(s.model_idx, 0);
+        // Drag and flick wildly: must not swap models, pitch stays clamped.
+        s.mouse_down();
+        s.mouse_drag(200, 200);
+        assert!((s.pitch - PITCH_MAX).abs() < 1e-6);
+        s.mouse_drag(-200, -500);
+        assert!((s.pitch + PITCH_MAX).abs() < 1e-6);
+        s.mouse_up();
+        assert!(s.flicking);
+        for _ in 0..20 {
+            s.advance(0.05);
+        }
+        assert_eq!(s.model_idx, 0, "user flick must not trigger model swap");
+
+        // Let auto-spin run through 3 half-turns: 0 -> 1 -> 2 -> 0.
+        let mut fresh = Scene::new(40, 20);
+        let half_turn_secs = std::f32::consts::PI / SPIN_SPEED;
+        for expected in [1, 2, 0] {
+            fresh.advance(half_turn_secs + 0.01);
+            assert_eq!(fresh.model_idx, expected);
+        }
+    }
+
+    #[test]
+    fn scene_clamps_tiny_dimensions_safely() {
+        let mut s = Scene::new(0, 0);
+        let f = s.render();
+        assert_eq!((f.w, f.h), (8, 6));
+        s.set_size(1, 2);
+        let f2 = s.render();
+        assert_eq!((f2.w, f2.h), (8, 6));
+    }
 }
 
 /// Cheap deterministic-ish random in [0,1). SplitMix64 over an atomic

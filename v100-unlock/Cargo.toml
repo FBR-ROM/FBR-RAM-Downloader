@@ -1,8 +1,10 @@
 [package]
 name = "v100-unlock"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Live HBM2 memory overclock for NVIDIA Tesla V100 (GV100): no VBIOS flash, no reboot"
+license = "Unlicense"
+repository = "https://github.com/FBR-ROM/FBR-RAM-Downloader"
 publish = false
 
 [dependencies]

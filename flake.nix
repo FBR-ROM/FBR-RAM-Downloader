@@ -63,13 +63,13 @@
         let
           rel = pkgs.lib.removePrefix (toString ./. + "/") path;
           top = pkgs.lib.head (pkgs.lib.splitString "/" rel);
-        in !(pkgs.lib.elem top [ "target" "models" "music" ".git" "preview.gif" ]);
+        in !(pkgs.lib.elem top [ "target" "models" "music" "demo" ".git" "preview.gif" ]);
     };
 
     # The installable release binary.
     package = pkgs: pkgs.rustPlatform.buildRustPackage {
       pname = "fbr-ram-downloader";
-      version = "0.1.0";
+      version = "0.1.1";
 
       src = cleanSrc pkgs;
       # Use the committed lock file: exact crate versions + sha256 hashes.
@@ -79,7 +79,7 @@
       buildInputs = [ pkgs.alsa-lib pkgs.libpulseaudio ];
       nativeBuildInputs = [ pkgs.pkg-config ];
 
-      # The unit tests are run in the dev shell; keep the package build lean.
+      # The unit tests are run in `checks` and in the dev shell.
       doCheck = false;
 
       meta = {
@@ -90,27 +90,45 @@
       };
     };
 
-    # The static V100 agent. It is committed (demo/v100-unlock), built as a
-    # musl static binary with no system dependencies, so this package just
-    # installs it — it runs on any Linux regardless of the system glibc.
-    # A plain runCommand (not a stdenv derivation) avoids the fetch/unpack
-    # machinery that a single file trips over.
-    agent = pkgs: pkgs.runCommand "v100-unlock-0.1.0" {
-      preferLocalBuild = true;
+    # The V100 agent, built from workspace source so every supported Linux
+    # architecture (x86_64-linux and aarch64-linux) gets a native binary.
+    agent = pkgs: pkgs.rustPlatform.buildRustPackage {
+      pname = "v100-unlock";
+      version = "0.1.1";
+
+      src = cleanSrc pkgs;
+      cargoLock = { lockFile = ./Cargo.lock; };
+      cargoBuildFlags = [ "-p" "v100-unlock" ];
+      doCheck = false;
+
       meta = {
-        description = "Static root tool that raises the HBM memory clock of every Tesla V100";
+        description = "Root tool that raises the HBM memory clock of every Tesla V100";
         license = pkgs.lib.licenses.unlicense;
         platforms = [ "x86_64-linux" "aarch64-linux" ];
         mainProgram = "v100-unlock";
       };
-    } ''
-      mkdir -p $out/bin
-      install -m 755 ${./demo/v100-unlock} $out/bin/v100-unlock
-    '';
+    };
+
+    # Workspace test check (`nix flake check`).
+    workspaceTests = pkgs: pkgs.rustPlatform.buildRustPackage {
+      pname = "fbr-ram-downloader-tests";
+      version = "0.1.1";
+
+      src = cleanSrc pkgs;
+      cargoLock = { lockFile = ./Cargo.lock; };
+      buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.alsa-lib pkgs.libpulseaudio ];
+      nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.pkg-config ];
+
+      doCheck = true;
+      cargoTestFlags = [ "--workspace" ];
+      installPhase = ''
+        touch $out
+      '';
+    };
   in
   {
     # Installable packages: `nix build .`, `nix run .`, `nix profile install .`
-    # The agent is a Linux-only static binary, so it is only offered on Linux.
+    # The agent is Linux-only, so it is only offered on Linux.
     packages = forAllSystems (pkgs:
       {
         default = package pkgs;
@@ -118,8 +136,10 @@
       // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
         agent = agent pkgs;
       });
-    defaultPackage = nixpkgs.lib.genAttrs systems (system:
-      self.packages.${system}.default);
+
+    checks = forAllSystems (pkgs: {
+      workspace-tests = workspaceTests pkgs;
+    });
 
     # Development environment: `nix develop`
     devShells = forAllSystems (pkgs: {

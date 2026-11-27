@@ -101,10 +101,32 @@ pub fn stranded(card: &Card) -> String {
 /// The one-line result, e.g. `hbm 877.5 → 1053.0 MHz (+20%) · 4 cards`.
 pub fn headline(pairs: &[(Coeff, Coeff)], to_stock: bool) -> String {
     let changed: Vec<(Coeff, Coeff)> = pairs.iter().copied().filter(|(a, b)| a != b).collect();
-    let Some(&(from, to)) = changed.first() else {
+    if changed.is_empty() {
         return already(pairs);
-    };
+    }
     let kept = pairs.len() - changed.len();
+    change_summary(&changed, kept, to_stock)
+}
+
+/// The one-line result of a dry run, e.g.
+/// `dry run: hbm 877.5 → 1053.0 MHz (+20%) · 4 cards · nothing written`.
+/// Mirrors [`headline`], but says what would happen and that nothing was
+/// written.
+pub fn dry_headline(pairs: &[(Coeff, Coeff)], to_stock: bool) -> String {
+    let changed: Vec<(Coeff, Coeff)> = pairs.iter().copied().filter(|(a, b)| a != b).collect();
+    if changed.is_empty() {
+        // `already` already carries the card count.
+        return format!("dry run: {} · nothing written", already(pairs));
+    }
+    let kept = pairs.len() - changed.len();
+    format!(
+        "dry run: {} · nothing written",
+        change_summary(&changed, kept, to_stock)
+    )
+}
+
+fn change_summary(changed: &[(Coeff, Coeff)], kept: usize, to_stock: bool) -> String {
+    let (from, to) = changed[0];
     let tail = if kept > 0 {
         format!(" · {kept} already there")
     } else {
@@ -122,31 +144,6 @@ pub fn headline(pairs: &[(Coeff, Coeff)], to_stock: bool) -> String {
         }
     };
     format!("{what} · {}{tail}", cards(changed.len()))
-}
-
-/// The one-line result of a dry run, e.g.
-/// `dry run: hbm 877.5 → 1053.0 MHz (+20%) · 4 cards · nothing written`.
-/// Mirrors [`headline`], but says what would happen and that nothing was
-/// written.
-pub fn dry_headline(pairs: &[(Coeff, Coeff)], to_stock: bool) -> String {
-    let changed: Vec<(Coeff, Coeff)> = pairs.iter().copied().filter(|(a, b)| a != b).collect();
-    if changed.is_empty() {
-        // `already` already carries the card count.
-        return format!("dry run: {} · nothing written", already(pairs));
-    }
-    let &(from, to) = changed.first().unwrap();
-    let same_from = changed.iter().all(|&(f, _)| f == from);
-    let same_to = changed.iter().all(|&(_, t)| t == to);
-    let what = match (same_from, same_to, to_stock) {
-        (_, false, _) => "hbm at target".to_string(),
-        (_, true, true) => format!("hbm back to {:.1} MHz", to.mhz()),
-        (false, true, false) => format!("hbm at {:.1} MHz", to.mhz()),
-        (true, true, false) => {
-            let pct = (to.mhz() / from.mhz() - 1.0) * 100.0;
-            format!("hbm {:.1} → {:.1} MHz ({pct:+.0}%)", from.mhz(), to.mhz())
-        }
-    };
-    format!("dry run: {what} · {} · nothing written", cards(changed.len()))
 }
 
 fn already(pairs: &[(Coeff, Coeff)]) -> String {

@@ -1,10 +1,9 @@
 //! Pluggable "hack" interface.
 //!
-//! The TUI drives everything through this trait. Today it's backed by
-//! [`StubHack`], which simulates a RAM download so the UI can be developed
-//! and demoed standalone. To wire in the real C hack, implement [`Hack`]
-//! around your `extern "C"` bindings (worked example in the README) and swap
-//! it in in `main.rs`.
+//! The TUI drives everything through this trait. Two implementations are wired
+//! in via `make_hack()` in `src/main.rs`: [`crate::v100::V100Hack`] (the real
+//! Tesla V100 HBM clock unlock) and [`StubHack`] (the `--demo` simulated
+//! download). To wire in a custom C-backed hack, see `ARCHITECTURE.md` §10.
 
 /// Snapshot of hack progress, polled once per frame by the TUI.
 #[derive(Debug, Clone)]
@@ -33,10 +32,9 @@ pub trait Hack {
     fn finish(&mut self) -> Result<(), String>;
 }
 
-/// Simulated hack: fills the bar over `total` seconds (at ~30 polls/sec)
-/// with fake status text. Frame-based so it's deterministic in both the
-/// interactive loop and headless `--dump`. Replace with the real C-backed
-/// implementation.
+/// Simulated hack: fills the bar over 12 seconds (at ~30 polls/sec) with fake
+/// status text. Frame-based so it's deterministic in both `--demo` and
+/// headless `--dump`.
 pub struct StubHack {
     polls: u32,
     total_polls: u32,
@@ -87,5 +85,37 @@ impl Hack for StubHack {
 
     fn finish(&mut self) -> Result<(), String> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn stub_hack_advances_monotonically_through_all_phases_and_finishes() {
+        let mut h = StubHack::new();
+        assert_eq!(h.start(), Ok(()));
+        let mut prev = 0.0f32;
+        let mut statuses = HashSet::new();
+        for step in 1..=360 {
+            let s = h.poll();
+            assert!(s.progress >= prev && s.progress <= 1.0);
+            assert!(s.error.is_none());
+            statuses.insert(s.status.clone());
+            if step < 360 {
+                assert!(!s.done);
+            } else {
+                assert!(s.done);
+                assert_eq!(s.progress, 1.0);
+            }
+            prev = s.progress;
+        }
+        assert_eq!(statuses.len(), 5);
+        // Subsequent polls stay done and clamped.
+        let after = h.poll();
+        assert!(after.done && after.progress == 1.0);
+        assert_eq!(h.finish(), Ok(()));
     }
 }

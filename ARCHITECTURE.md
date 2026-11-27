@@ -223,24 +223,18 @@ scroller     row  h-1
 region       rows region_top ..= region_bottom
                region_top    = 1
                region_bottom = h - 1 - BREATH_ROWS - LOADER_ROWS
-model        largest breakpoint (mw, mh) with
-               mw <= w - 4  and  mh <= region_h
-             placed at x = (w - mw) / 2                      (exact centering)
-                       y = region_top + (region_h - mh) * MODEL_V_BIAS
+model        largest breakpoint (_, mh) with mh <= region_h
+               spans full inner width: model_x = 1, model_w = w - 2
+               placed at y = region_top + (region_h - mh) * MODEL_V_BIAS
 ```
 
-**Model size** comes from a fixed breakpoint table (`MODEL_BREAKPOINTS`), largest
-first: `56x28, 48x24, 40x20, 32x16, 24x12, 18x9, 14x7, 10x5`. Cells are ~1:2, so a
-square model is twice as wide as it is tall. The largest entry that fits both
-the available width and the region's rows is used; below the smallest the model
-is omitted rather than drawn as a sliver. Discrete tiers (rather than a
-continuous scale) keep the model's pixel size stable and the composition
-predictable.
-
-**Horizontal placement** is exact: `x = (w - mw) / 2` splits the leftover space
-into a left margin of `(w - mw) / 2` and a right margin of
-`w - mw - (w - mw) / 2`, which differ by at most one cell. Because
-`mw <= w - 4`, a centred model can never touch a side border.
+**Model height** comes from a fixed breakpoint table (`MODEL_BREAKPOINTS`),
+largest first: `28, 24, 20, 16, 12, 9, 7, 5` rows. The largest height that fits
+`region_h` is used; below the smallest the model is omitted rather than drawn as
+a sliver. The model frame spans the full inner width (`col 1..w-2`) so wide
+models (v100, P5000) extend to the inner edges without clipping while
+`Scene::render` centers the projection horizontally. Discrete height tiers keep
+the composition predictable.
 
 **Vertical placement** is deliberately *below* centre by `MODEL_V_BIAS = 0.60`
 (a fraction of the leftover space; 0.5 is dead centre, 1.0 is flush above the
@@ -460,52 +454,44 @@ The stream and sink are dropped on exit, so music never outlives the program.
 
 ## 14. Testing and verification
 
-The cracktro's unit tests run with `cargo test`, in `tui.rs`, `scene.rs`,
-`canvas.rs` and `v100.rs`:
+`cargo test --workspace` runs the full suite across both crates:
 
-- the model never touches the border;
-- the model always stays inside its region;
-- the model is horizontally centred and sits below centre by exactly
-  `MODEL_V_BIAS` (never above centre);
-- the loader block is ordered and inside the border;
-- the model clears the loader;
-- the drawn model stays within 3 cells of its frame centre over a full spin
-  across all three models (the flat badges drift more as they turn edge-on);
-- the starfield's respawning stars do not collapse onto a single point
-  (regression: the old respawn formula was a contraction with a fixed point
-  at −1, so after one respawn every star sat at (−1, −1) and the whole field
-  degenerated into a single diagonal);
-- the background-contrast remap keeps every palette shade visible against a
-  sweep of backgrounds (both palettes), including the mid-tones a naive
-  dark/light split gets wrong;
-- a non-detected background falls back to shades visible on both black and
-  white.
-
-`v100-unlock` carries its own, larger suite (`v100-unlock/tests/`), run with
-`cargo test -p v100-unlock`. It drives the real run logic against a
-register-level simulator of the GV100, so the hardware invariants are checked
-without a card:
-
-- **all-or-nothing** — one card failing, a wrong metered clock, or a cancel
-  mid-run puts every card back; a hung card is the only state that is not
-  recoverable, and it is named as such;
-- **the write-only window is never read** — `0x98BC98` and its multicast
-  window are refused for reads, and a misaligned or out-of-range offset is
-  refused;
-- **cancellation** — SIGINT, SIGTERM, SIGHUP (a dropped ssh session) and a
-  closed stdin each put every card back, even when the reader is gone;
-- **the protocol** — every `--events` line round-trips, control characters
-  cannot drive the terminal, and each outcome maps to the state the hardware
-  is left in;
-- **a chaos soak** — thousands of seeded random runs (1–16 cards of any V100
-  model, any starting clock, random faults and random cancellation) asserting
-  that whatever happens, the hardware ends up exactly where the outcome says.
-
-Beyond the unit tests, two sweep scripts were used during development (kept out
-of the repo): a 224-size layout sweep asserting containment and placement, and a
-frame-level edge scan asserting that nothing but frame characters ever appears
-on the outer ring. Both are driven by `--layout` and `--dump`, which is exactly
-why those flags exist.
+- **Cracktro unit tests** (`src/main.rs`, `src/tui.rs`, `src/scene.rs`,
+  `src/canvas.rs`, `src/hack.rs`, `src/music.rs`, `src/v100.rs`):
+  - CLI argument parsing (`--help`, `--version`, unknown-flag rejection,
+    `--dump` / `--layout` / `--host` / `--music` edge cases) and OSC 11
+    background-response parsing (BEL/ST terminators, 8/16-bit hex, incomplete
+    reads);
+  - a 250+ size layout and rendered-frame invariant sweep (`3x3` to `240x120`)
+    asserting box-frame outer-ring integrity, model/loader containment, strict
+    4-color foreground-only rendering, and `Celebration` blow-away + resize;
+  - embedded 3D mesh validity, spin centering, mouse drag/flick isolation, and
+    starfield respawn non-collapse;
+  - palette contrast remapping, quantization, ANSI deduplication, audio card
+    and track discovery parsers, and `V100Hack` command/handshake/presenter
+    invariants.
+- **Cracktro integration tests** (`tests/cli.rs`,
+  `tests/bundle_and_installer.rs`):
+  - end-to-end binary checks for `--help`, `--version`, bad flags, `--layout`,
+    deterministic `--dump`, and `--headless --demo` modes;
+  - ELF dependency and hermetic `LD_DEBUG=libs` verification of the committed
+    `demo/` bundle (ensuring zero host-library leaks and a fully static
+    `demo/v100-unlock`);
+  - `install.sh` CLI validation, `--dry-run`, and a full sandboxed
+    install → verify → idempotent re-install → `--uninstall` cycle.
+- **`v100-unlock` hardware-invariant suite** (`v100-unlock/tests/`):
+  - **all-or-nothing** — one card failing, a wrong metered clock, or a cancel
+    mid-run puts every card back; a hung card is the only non-recoverable
+    state, and it is named as such;
+  - **write-only window** — `0x98BC98` and its multicast window are refused for
+    reads, and misaligned or out-of-range offsets are refused;
+  - **counter metering & wrap** — 36-bit wrap and mid-read `hi` wrap retry;
+  - **cancellation** — `SIGINT`, `SIGTERM`, `SIGHUP`, and closed stdin each put
+    every card back even when stdout is closed;
+  - **protocol** — `--events` round-trip, control-char stripping, exit codes;
+  - **chaos soak** — 3,000+ seeded random live runs plus 500 dry-run scenarios
+    across 1–16 cards (including V100-SXM2, PCIe, FHHL, and V100S), random
+    faults, and random cancellation.
 
 ## 15. Key decisions and trade-offs
 

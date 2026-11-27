@@ -21,8 +21,8 @@ use v100_unlock::sim::Fault;
 /// Scenarios per test run; `CHAOS_RUNS` raises it for a long soak.
 const RUNS: u64 = 3_000;
 const MAX_CARDS: u64 = 16;
-/// SXM2 16 GB, SXM2 32 GB, PCIe 16 GB, and the V100S (stock 1107 MHz).
-const DEVICES: [u16; 4] = [0x1db1, 0x1db5, 0x1db4, 0x1df6];
+/// SXM2 16 GB, SXM2 32 GB, PCIe 16 GB, FHHL 16 GB (stock 810 MHz), and V100S (stock 1107 MHz).
+const DEVICES: [u16; 5] = [0x1db1, 0x1db5, 0x1db4, 0x1db3, 0x1df6];
 
 /// xorshift64*: small, deterministic, good enough to spread scenarios.
 struct Rng(u64);
@@ -94,7 +94,7 @@ fn scenario(rng: &mut Rng) -> Scenario {
 /// clock this tool never sets.
 fn start_ndiv(rng: &mut Rng, stock: u8, wild: bool) -> u8 {
     if wild && rng.below(8) == 0 {
-        return rng.pick(&[60, 64, 81, 90]);
+        return rng.pick(&[59, 64, 81, 90]);
     }
     rng.pick(&[
         stock,
@@ -187,6 +187,29 @@ fn every_outcome_matches_the_hardware_it_leaves() {
         "done/refused/rolled-back/unknown {kinds:?}"
     );
     println!("done/refused/rolled-back/unknown over {runs} runs: {kinds:?}");
+}
+
+#[test]
+fn dry_run_never_writes_a_register_across_random_scenarios() {
+    let mut dry_count = 0usize;
+    let mut refused_count = 0usize;
+    for seed in 0..500u64 {
+        let mut rng = Rng::new(seed ^ 0xD00D_F00D);
+        let s = scenario(&mut rng);
+        let rig = Rig::new(&s.specs);
+        let starts = rig.ndivs();
+        let (outcome, lines) = rig.go_dry(s.goal, &common::never, true);
+        let context = format!("dry seed {seed}: {s:?} -> {outcome:?}");
+        assert_eq!(rig.write_count(), 0, "dry run wrote a register: {context}");
+        assert_eq!(rig.ndivs(), starts, "dry run changed a clock: {context}");
+        match outcome.kind {
+            Kind::Dry => dry_count += 1,
+            Kind::Refused => refused_count += 1,
+            other => panic!("unexpected dry-run outcome {other:?}: {context}"),
+        }
+        check_lines(&lines, &outcome, &context);
+    }
+    assert!(dry_count > 100 && refused_count > 50);
 }
 
 fn kind_index(kind: Kind) -> usize {

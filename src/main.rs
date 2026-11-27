@@ -31,7 +31,7 @@ mod tui;
 mod v100;
 
 use crossterm::{
-    event::{self, Event, KeyCode, MouseEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -41,6 +41,39 @@ use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_millis(33); // ~30 fps
 
+const USAGE: &str = "\
+usage: fbr-ram-downloader [options]
+
+  Live HBM2 memory clock unlock for every NVIDIA Tesla V100 (1053 MHz daily,
+  1080 MHz sprint), wrapped in a 4-color Game Boy cracktro.
+
+options:
+  --demo             simulated download: no hardware, no root
+  --headless         run v100-unlock in plain text (scripts, systemd)
+  --host HOST        run on the V100 machine HOST over ssh
+  --dry-run          survey and report, write nothing
+  --sprint           1080 MHz (+23%) instead of daily 1053 MHz (+20%)
+  --fast             skip status-line pacing in the cracktro
+  --grey             use the Grey Quarttrochrome palette (default: Green)
+  --dark / --light   force terminal theme instead of auto-detecting
+  --music FILE       play a specific audio track (default: auto-detect music/)
+  --no-music         start with music off
+  --dump [N [W H]]   print N frames at WxH to stdout and exit
+  --layout [W H]     print computed layout for WxH and exit
+  -V, --version      print version and exit
+  -h, --help         this help
+
+keys: q / Esc / Ctrl-C quit, m mute/unmute, mouse drag spins the 3D model
+";
+
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    Help,
+    Version,
+    Run(Args),
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct Args {
     dump: Option<(usize, usize, usize)>,
     grey: bool,
@@ -66,8 +99,8 @@ struct Args {
     headless: bool,
 }
 
-fn parse_args() -> Args {
-    let argv: Vec<String> = std::env::args().collect();
+fn parse_args_from<I: IntoIterator<Item = String>>(argv: I) -> Result<Action, String> {
+    let argv: Vec<String> = argv.into_iter().collect();
     let mut args = Args {
         dump: None,
         grey: false,
@@ -85,19 +118,39 @@ fn parse_args() -> Args {
     };
     let mut i = 1;
     while i < argv.len() {
-        match argv[i].as_str() {
+        let arg = argv[i].as_str();
+        match arg {
+            "-h" | "--help" => return Ok(Action::Help),
+            "-V" | "--version" => return Ok(Action::Version),
             "--dump" => {
-                let n = argv.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(30);
-                let w = argv.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(80);
-                let h = argv.get(i + 3).and_then(|s| s.parse().ok()).unwrap_or(24);
-                args.dump = Some((n, w, h));
-                i += 4;
+                if let Some(n) = argv.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(w) = argv.get(i + 2).and_then(|s| s.parse::<usize>().ok()) {
+                        let Some(h) = argv.get(i + 3).and_then(|s| s.parse::<usize>().ok()) else {
+                            return Err("--dump width requires a height".into());
+                        };
+                        if w == 0 || h == 0 {
+                            return Err("--dump dimensions must be positive".into());
+                        }
+                        args.dump = Some((n, w, h));
+                        i += 4;
+                    } else {
+                        args.dump = Some((n, 80, 24));
+                        i += 2;
+                    }
+                } else {
+                    args.dump = Some((30, 80, 24));
+                    i += 1;
+                }
             }
             "--layout" => {
                 args.layout = true;
-                let w = argv.get(i + 1).and_then(|s| s.parse().ok());
-                let h = argv.get(i + 2).and_then(|s| s.parse().ok());
-                if let (Some(w), Some(h)) = (w, h) {
+                if let Some(w) = argv.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                    let Some(h) = argv.get(i + 2).and_then(|s| s.parse::<usize>().ok()) else {
+                        return Err("--layout width requires a height".into());
+                    };
+                    if w == 0 || h == 0 {
+                        return Err("--layout dimensions must be positive".into());
+                    }
                     args.layout_size = Some((w, h));
                     i += 3;
                 } else {
@@ -141,21 +194,45 @@ fn parse_args() -> Args {
                 i += 1;
             }
             "--host" => {
-                args.host = argv.get(i + 1).cloned();
+                let Some(h) = argv.get(i + 1) else {
+                    return Err("--host needs a host name".into());
+                };
+                if h.is_empty() || h.starts_with('-') || h.contains(char::is_whitespace) {
+                    return Err(format!("{h:?} is not a host name"));
+                }
+                args.host = Some(h.clone());
                 i += 2;
             }
-            "--music" => {
-                if let Some(f) = argv.get(i + 1) {
-                    args.music = Some(f.clone());
-                    i += 2;
-                } else {
-                    i += 1;
+            _ if arg.starts_with("--host=") => {
+                let h = &arg["--host=".len()..];
+                if h.is_empty() || h.starts_with('-') || h.contains(char::is_whitespace) {
+                    return Err(format!("{h:?} is not a host name"));
                 }
+                args.host = Some(h.to_string());
+                i += 1;
             }
-            _ => i += 1,
+            "--music" => {
+                let Some(f) = argv.get(i + 1) else {
+                    return Err("--music needs a file path".into());
+                };
+                if f.is_empty() {
+                    return Err("--music needs a file path".into());
+                }
+                args.music = Some(f.clone());
+                i += 2;
+            }
+            _ if arg.starts_with("--music=") => {
+                let f = &arg["--music=".len()..];
+                if f.is_empty() {
+                    return Err("--music needs a file path".into());
+                }
+                args.music = Some(f.to_string());
+                i += 1;
+            }
+            other => return Err(format!("unknown option {other:?} (see --help)")),
         }
     }
-    args
+    Ok(Action::Run(args))
 }
 
 /// The hack to run. This is the single integration point: the starfield, 3D
@@ -171,7 +248,21 @@ fn make_hack(args: &Args) -> Box<dyn hack::Hack> {
 /// Errors are printed as the plain sentence they are (a `main` that returns
 /// `Result` prints their debug form, in quotes).
 fn main() -> std::process::ExitCode {
-    let args = parse_args();
+    let args = match parse_args_from(std::env::args()) {
+        Ok(Action::Help) => {
+            print!("{USAGE}");
+            return std::process::ExitCode::SUCCESS;
+        }
+        Ok(Action::Version) => {
+            println!("fbr-ram-downloader {}", env!("CARGO_PKG_VERSION"));
+            return std::process::ExitCode::SUCCESS;
+        }
+        Ok(Action::Run(args)) => args,
+        Err(e) => {
+            eprintln!("fbr-ram-downloader: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
     // `--headless` runs the V100 agent and streams its plain text, returning
     // the agent's own exit code (0 at target, 2 untouched, 3 put back, 4
     // unknown). No terminal, no cracktro — for scripts and systemd.
@@ -304,8 +395,8 @@ fn dump_frames(n: usize, w: usize, h: usize, palette: canvas::Palette) -> Result
 }
 
 fn scene_size(term_w: usize, term_h: usize) -> (usize, usize) {
-    // Logo block in cells (shared with the TUI layout). The scene renders
-    // half-block pixels internally: (units, 2 * rows) pixels.
+    // Logo region in cells (shared with the TUI layout): one brightness sample
+    // per cell.
     tui::logo_cells(term_w, term_h)
 }
 
@@ -404,24 +495,39 @@ fn query_background() -> Option<(u8, u8, u8)> {
     bg
 }
 
-/// Parse an `rgb:RR/GG/BB` payload out of an OSC 11 response.
+/// Parse a complete `rgb:RR/GG/BB` payload out of an OSC 11 response.
 ///
-/// Terminals report either 8-bit (`rgb:ff/80/00`) or 16-bit
-/// (`rgb:ffff/8080/0000`) hex; both are scaled to 8-bit.
+/// Requires an OSC terminator (`BEL` `\x07`, `ST` `\x1b\\`, or 8-bit `ST`
+/// `\u{9c}`) after the RGB triplet so a partial read never misparses a
+/// truncated blue channel. Scales 1-, 2-, 3-, or 4-digit hex channels to 8-bit.
 fn parse_osc11(data: &[u8]) -> Option<(u8, u8, u8)> {
     let s = String::from_utf8_lossy(data);
     let start = s.find("rgb:")? + 4;
     let rest = &s[start..];
-    let parts: Vec<&str> = rest.splitn(3, '/').collect();
-    if parts.len() < 3 {
+    let term = [
+        rest.find('\x07'),
+        rest.find("\x1b\\"),
+        rest.find('\u{9c}'),
+    ]
+    .into_iter()
+    .flatten()
+    .min()?;
+    let payload = &rest[..term];
+    let parts: Vec<&str> = payload.split('/').collect();
+    if parts.len() != 3 {
         return None;
     }
     let to8 = |p: &str| -> Option<u8> {
         let p = p.trim();
+        if p.is_empty() || p.len() > 4 || !p.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
         let v = u32::from_str_radix(p, 16).ok()?;
         match p.len() {
-            1..=2 => Some(v as u8), // 8-bit
-            3..=4 => Some(((v * 255) / 0xffff) as u8), // 16-bit
+            1 => Some((v * 17) as u8),
+            2 => Some(v as u8),
+            3 => Some(((v * 255) / 0xfff) as u8),
+            4 => Some(((v * 255) / 0xffff) as u8),
             _ => None,
         }
     };
@@ -463,13 +569,14 @@ fn run_loop(
         // Drain all pending events (keeps the frame rate steady).
         while event::poll(Duration::from_millis(0))? {
             match event::read()? {
-                Event::Key(k) if k.code == KeyCode::Char('q') => {
-                    return Ok(());
-                }
-                // 'm' toggles the background music.
-                Event::Key(k) if k.code == KeyCode::Char('m') => {
-                    music.toggle();
-                }
+                Event::Key(k) if k.kind == KeyEventKind::Press => match k.code {
+                    KeyCode::Char('q' | 'Q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('c' | 'C') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(());
+                    }
+                    KeyCode::Char('m' | 'M') => music.toggle(),
+                    _ => {}
+                },
                 // Resize is handled by the per-frame size poll above; the
                 // event is ignored here.
                 Event::Mouse(m) => match m.kind {
@@ -532,5 +639,135 @@ fn run_loop(
         if elapsed < TICK {
             std::thread::sleep(TICK - elapsed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Action, String> {
+        let mut argv = vec!["fbr-ram-downloader".to_string()];
+        argv.extend(args.iter().map(|s| s.to_string()));
+        parse_args_from(argv)
+    }
+
+    #[test]
+    fn help_and_version_flags_return_early() {
+        assert_eq!(parse(&["--help"]), Ok(Action::Help));
+        assert_eq!(parse(&["-h"]), Ok(Action::Help));
+        assert_eq!(parse(&["--version"]), Ok(Action::Version));
+        assert_eq!(parse(&["-V"]), Ok(Action::Version));
+    }
+
+    #[test]
+    fn parses_all_valid_flags() {
+        let Action::Run(a) = parse(&[
+            "--demo",
+            "--headless",
+            "--sprint",
+            "--dry-run",
+            "--fast",
+            "--grey",
+            "--dark",
+            "--no-music",
+            "--host",
+            "c4130",
+            "--music=track.mp3",
+        ])
+        .unwrap() else {
+            panic!("expected Run");
+        };
+        assert!(a.demo && a.headless && a.sprint && a.dry_run && a.fast && a.grey && a.no_music);
+        assert_eq!(a.theme, Some(true));
+        assert_eq!(a.host.as_deref(), Some("c4130"));
+        assert_eq!(a.music.as_deref(), Some("track.mp3"));
+
+        let Action::Run(b) = parse(&["--light", "--host=gpu01", "--music", "song.ogg"]).unwrap()
+        else {
+            panic!("expected Run");
+        };
+        assert_eq!(b.theme, Some(false));
+        assert_eq!(b.host.as_deref(), Some("gpu01"));
+        assert_eq!(b.music.as_deref(), Some("song.ogg"));
+    }
+
+    #[test]
+    fn dump_and_layout_do_not_swallow_following_flags() {
+        let Action::Run(a) = parse(&["--dump", "--grey"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(a.dump, Some((30, 80, 24)));
+        assert!(a.grey);
+
+        let Action::Run(b) = parse(&["--dump", "60", "--grey"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(b.dump, Some((60, 80, 24)));
+        assert!(b.grey);
+
+        let Action::Run(c) = parse(&["--dump", "12", "100", "30", "--grey"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(c.dump, Some((12, 100, 30)));
+        assert!(c.grey);
+
+        let Action::Run(d) = parse(&["--layout", "--grey"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert!(d.layout && d.layout_size.is_none() && d.grey);
+
+        let Action::Run(e) = parse(&["--layout", "90", "28"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(e.layout_size, Some((90, 28)));
+    }
+
+    #[test]
+    fn rejects_unknown_and_malformed_flags() {
+        for bad in [
+            &["--dryrun"][..],
+            &["foo"][..],
+            &["--dump", "10", "80"][..],
+            &["--dump", "10", "0", "24"][..],
+            &["--layout", "80"][..],
+            &["--layout", "80", "0"][..],
+            &["--host"][..],
+            &["--host", ""][..],
+            &["--host", "--sprint"][..],
+            &["--host=bad host"][..],
+            &["--music"][..],
+            &["--music="][..],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn parse_osc11_handles_bel_st_8bit_16bit_and_incomplete_payloads() {
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:ff/80/00\x07"), Some((0xff, 0x80, 0x00)));
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:1e1e/1e1e/2e2e\x07"),
+            Some((0x1e, 0x1e, 0x2e))
+        );
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:ffff/0000/8080\x1b\\"),
+            Some((0xff, 0x00, 0x80))
+        );
+        assert_eq!(
+            parse_osc11(b"junk\x1b]11;rgb:f/0/8\x07trailing"),
+            Some((0xff, 0x00, 0x88))
+        );
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:fff/000/800\x07"),
+            Some((0xff, 0x00, 0x7f))
+        );
+        // Incomplete (no terminator yet): must return None so read loop waits.
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:1e1e/1e1e/2e"), None);
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:ff/80/00"), None);
+        // Malformed payloads.
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:zz/00/00\x07"), None);
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:ff/00\x07"), None);
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:ff/00/00/00\x07"), None);
     }
 }

@@ -200,3 +200,61 @@ fn status_flags_a_clock_that_measures_wrong() {
     assert!(!all_ok);
     assert!(lines[0].ends_with("expected 877.5"), "{lines:?}");
 }
+
+#[test]
+fn counter_read_retries_lo_when_hi_wraps_mid_read() {
+    use std::cell::Cell;
+    use v100_unlock::bar0::Bar0;
+    use v100_unlock::regs::{dram_counter_hi, dram_counter_lo, BOOT0_GV100, PMC_BOOT_0};
+
+    // Mock BAR0 where PLL 0 wraps from hi=0, lo=0xFFFF_FFFF to hi=1, lo=10
+    // between the first and second `hi` read of the initial sample, then
+    // advances by exactly 500_000_000 cycles (1000.0 MHz over 0.5 s).
+    struct WrapBar {
+        phase: Cell<u32>,
+    }
+    impl Bar0 for WrapBar {
+        fn read32(&self, off: u32) -> u32 {
+            if off == PMC_BOOT_0 {
+                return BOOT0_GV100;
+            }
+            if off == dram_counter_hi(0) {
+                let p = self.phase.get();
+                self.phase.set(p + 1);
+                return match p {
+                    0 => 0, // hi_before = 0
+                    1 => 1, // hi_after = 1 (wrapped!) -> forces lo re-read
+                    _ => 1, // second sample hi = 1
+                };
+            }
+            if off == dram_counter_lo(0) {
+                return match self.phase.get() {
+                    1 => 0xFFFF_FFFE, // stale pre-wrap lo
+                    2 => 10,          // fresh post-wrap lo (count = 0x1_0000_000A)
+                    _ => 500_000_010, // +500_000_000 cycles in 0.5 s = 1000.0 MHz
+                };
+            }
+            // Other 7 PLLs: return 0 on first sample, 500_000_000 on second.
+            for j in 1..8 {
+                if off == dram_counter_hi(j) {
+                    return 0;
+                }
+                if off == dram_counter_lo(j) {
+                    return if self.phase.get() >= 3 { 500_000_000 } else { 0 };
+                }
+            }
+            0
+        }
+        fn write32(&self, _off: u32, _val: u32) {}
+    }
+
+    let clock = SimClock::new();
+    let bar = WrapBar { phase: Cell::new(0) };
+    let regs = Regs::new(&bar, Access::ReadOnly);
+    let rates = measure(&[&regs], &clock).remove(0).unwrap();
+    assert!(
+        (rates[0] - 1000.0).abs() < 0.01,
+        "expected tear-free 1000.0 MHz, got {:?}",
+        rates[0]
+    );
+}

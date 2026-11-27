@@ -290,4 +290,53 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn shade_and_cycle_shade_always_produce_exact_palette_colors() {
+        for pal in [Palette::green(), Palette::grey()] {
+            for b in [-0.5, 0.0, 0.25, 0.5, 0.75, 1.0, 1.5] {
+                assert!(pal.colors.contains(&pal.shade(b)));
+                for t in [0.0, 0.33, 1.25, 4.7] {
+                    assert!(pal.colors.contains(&pal.cycle_shade(b, t, 0.17)));
+                }
+            }
+            assert_eq!(pal.shade(1.0), pal.colors[0]);
+            assert_eq!(pal.shade(0.0), pal.colors[3]);
+        }
+    }
+
+    #[test]
+    fn canvas_clipping_ansi_and_buffer_invariants() {
+        use super::Canvas;
+        let pal = Palette::green();
+        let mut cv = Canvas::new(10, 3);
+        // Out-of-bounds writes must be safe no-ops.
+        cv.set(10, 0, 'X', pal.colors[0], true);
+        cv.set(0, 3, 'X', pal.colors[0], true);
+        // Centered text wider than inner area clips without touching col 0 or 9.
+        cv.text_center_inner(1, "ABCDEFGHIJKLMNOP", pal.colors[1], true);
+        assert_eq!(cv.cells[10].ch, ' ');
+        assert_eq!(cv.cells[19].ch, ' ');
+        assert_eq!(cv.cells[11].ch, 'A');
+        assert_eq!(cv.cells[18].ch, 'H');
+
+        let ansi = cv.to_ansi();
+        assert!(!ansi.contains("\x1b[48;"), "must never emit background colors");
+        assert!(ansi.ends_with("\x1b[0m"));
+        // Adjacent cells with identical fg/bold emit the color sequence only once.
+        let fg_seq = format!(
+            "\x1b[38;2;{};{};{}m",
+            pal.colors[1].0, pal.colors[1].1, pal.colors[1].2
+        );
+        assert_eq!(ansi.matches(&fg_seq).count(), 1);
+
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 10, 3));
+        cv.to_buffer(&mut buf);
+        assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "A");
+        assert!(buf
+            .cell((1, 1))
+            .unwrap()
+            .modifier
+            .contains(ratatui::style::Modifier::BOLD));
+    }
 }

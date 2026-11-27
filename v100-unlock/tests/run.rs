@@ -314,3 +314,15 @@ fn a_dry_run_of_restore_reports_the_way_down() {
     assert_eq!(outcome.summary, "dry run: hbm back to 877.5 MHz · 2 cards · nothing written");
     assert_eq!(rig.write_count(), 0);
 }
+
+#[test]
+fn a_dry_run_with_mixed_cards_reports_cards_already_at_target() {
+    let rig = Rig::new(&[(V100, 65, OK), (V100S, 82, OK)]);
+    let (outcome, _) = rig.go_dry(Goal::Daily, &never, true);
+    assert_eq!(outcome.kind, Kind::Dry, "{}", outcome.summary);
+    assert_eq!(
+        outcome.summary,
+        "dry run: hbm 877.5 → 1053.0 MHz (+20%) · 1 card · 1 already there · nothing written"
+    );
+    assert_eq!(rig.write_count(), 0);
+}

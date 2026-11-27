@@ -151,6 +151,16 @@ fn demo_agent_path() -> String {
     if installed.exists() {
         return AGENT.to_string();
     }
+    if let Some(arg0) = std::env::args().next() {
+        if let Some(dir) = std::path::Path::new(&arg0).parent() {
+            if !dir.as_os_str().is_empty() {
+                let sibling = dir.join("v100-unlock");
+                if sibling.exists() {
+                    return sibling.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let sibling = dir.join("v100-unlock");
@@ -174,6 +184,21 @@ pub fn agent_command(
     dry_run: bool,
     demo: bool,
     events: bool,
+) -> Result<Command, String> {
+    #[cfg(unix)]
+    let is_root = unsafe { libc::geteuid() } == 0;
+    #[cfg(not(unix))]
+    let is_root = false;
+    agent_command_for(host, sprint, dry_run, demo, events, is_root)
+}
+
+fn agent_command_for(
+    host: &Option<String>,
+    sprint: bool,
+    dry_run: bool,
+    demo: bool,
+    events: bool,
+    is_root: bool,
 ) -> Result<Command, String> {
     let mut args = vec!["apply"];
     if events {
@@ -210,16 +235,24 @@ pub fn agent_command(
         None => {
             // A simulated run touches no hardware and needs no root, so it runs
             // the agent directly (the demo bundle ships it next to the binary).
-            // A real run writes the registers, so it goes through sudo to the
-            // installed, sudoers-named agent.
+            // A real run writes the registers: if already root (systemd unit or
+            // `sudo fbr-ram-downloader`), run the agent directly; otherwise
+            // escalate non-interactively via `sudo -n` so a missing sudoers rule
+            // fails immediately with a clear explanation instead of hanging.
             if demo {
                 let agent = demo_agent_path();
+                let mut direct = Command::new(&agent);
+                direct.args(args);
+                Ok(direct)
+            } else if is_root {
+                let agent = real_agent_path();
                 let mut direct = Command::new(&agent);
                 direct.args(args);
                 Ok(direct)
             } else {
                 let agent = real_agent_path();
                 let mut sudo = Command::new("sudo");
+                sudo.arg("-n");
                 sudo.arg(&agent);
                 sudo.args(args);
                 Ok(sudo)
@@ -553,16 +586,59 @@ mod tests {
 
     #[test]
     fn the_cracktro_drives_the_installed_agent_with_the_protocol() {
-        let (prog, args) = program_args(&agent_command(&None, false, false, false, true).unwrap());
+        let (prog, args) =
+            program_args(&agent_command_for(&None, false, false, false, true, false).unwrap());
         assert_eq!(prog, "sudo");
-        assert_eq!(args, vec![AGENT, "apply", "--events"]);
+        assert_eq!(args, vec!["-n", AGENT, "apply", "--events"]);
     }
 
     #[test]
     fn a_real_headless_run_goes_through_sudo_too() {
-        let (prog, args) = program_args(&agent_command(&None, true, true, false, false).unwrap());
+        let (prog, args) =
+            program_args(&agent_command_for(&None, true, true, false, false, false).unwrap());
         assert_eq!(prog, "sudo");
-        assert_eq!(args, vec![AGENT, "apply", "--sprint", "--dry-run"]);
+        assert_eq!(args, vec!["-n", AGENT, "apply", "--sprint", "--dry-run"]);
+    }
+
+    #[test]
+    fn a_root_run_invokes_the_agent_directly_without_sudo() {
+        let (prog, args) =
+            program_args(&agent_command_for(&None, false, false, false, false, true).unwrap());
+        assert_eq!(prog, AGENT);
+        assert_eq!(args, vec!["apply"]);
+    }
+
+    #[test]
+    fn a_dry_run_end_sets_done_and_custom_message() {
+        let mut show = Presenter::new(Duration::ZERO);
+        show.push(Line::End(Outcome::new(
+            Kind::Dry,
+            "dry run: hbm 877.5 → 1053.0 MHz (+20%) · 4 cards · nothing written",
+        )));
+        let state = show.tick(at(0));
+        assert!(state.done && state.progress == 1.0 && state.error.is_none());
+        assert_eq!(
+            state.done_message.as_deref(),
+            Some("dry run: hbm 877.5 → 1053.0 MHz (+20%) · 4 cards · nothing written")
+        );
+    }
+
+    #[test]
+    fn handshake_reports_protocol_mismatch_and_early_refusal() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Err("v100-unlock 99".into())).unwrap();
+        let mut hack = V100Hack::new(None, false, false, true);
+        let stderr = thread::spawn(|| String::new());
+        let err = hack.handshake(&rx, stderr).unwrap_err();
+        assert!(err.contains("v100-unlock 99"), "{err}");
+
+        let (tx2, rx2) = mpsc::channel();
+        tx2.send(Ok(Line::Header)).unwrap();
+        tx2.send(Ok(Line::End(Outcome::new(Kind::Refused, "no Tesla V100 found"))))
+            .unwrap();
+        let mut hack2 = V100Hack::new(None, false, false, true);
+        let stderr2 = thread::spawn(|| String::new());
+        assert_eq!(hack2.handshake(&rx2, stderr2).unwrap_err(), "no Tesla V100 found");
     }
 
     #[test]

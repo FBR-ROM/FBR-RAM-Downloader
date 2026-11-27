@@ -10,16 +10,19 @@
 #   ./demo/run.sh            # interactive (press q to quit)
 #   ./demo/run.sh --dump 60  # headless: print 60 frames to stdout
 set -euo pipefail
-cd "$(dirname "$0")"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
-LOADER="lib/ld-linux-x86-64.so.2"
-BIN="fbr-ram-downloader"
+LOADER="$HERE/lib/ld-linux-x86-64.so.2"
+BIN="$HERE/fbr-ram-downloader"
 
 if [[ ! -x "$LOADER" || ! -x "$BIN" ]]; then
-  echo "error: missing $LOADER or $BIN in $(pwd)" >&2
+  echo "error: missing $LOADER or $BIN" >&2
   exit 1
 fi
 
-# Run through the bundled loader, resolving all shared libs from demo/lib.
+# Run hermetically through the bundled loader, resolving all shared libs from
+# demo/lib without falling back to host ld.so.cache or RPATHs.
 # --demo: the simulated download, not the real V100 hack.
-exec "$LOADER" --library-path "$PWD/lib" "$PWD/$BIN" --demo "$@"
+export FBR_V100_AGENT="$HERE/v100-unlock"
+export FBR_BUNDLED_ALSA=1
+exec "$LOADER" --inhibit-cache --inhibit-rpath '' --library-path "$HERE/lib" "$BIN" --demo "$@"
