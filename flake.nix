@@ -69,7 +69,7 @@
     # The installable release binary.
     package = pkgs: pkgs.rustPlatform.buildRustPackage {
       pname = "fbr-ram-downloader";
-      version = "0.1.1";
+      version = "0.1.2";
 
       src = cleanSrc pkgs;
       # Use the committed lock file: exact crate versions + sha256 hashes.
@@ -94,7 +94,7 @@
     # architecture (x86_64-linux and aarch64-linux) gets a native binary.
     agent = pkgs: pkgs.rustPlatform.buildRustPackage {
       pname = "v100-unlock";
-      version = "0.1.1";
+      version = "0.1.2";
 
       src = cleanSrc pkgs;
       cargoLock = { lockFile = ./Cargo.lock; };
@@ -112,7 +112,7 @@
     # Workspace test check (`nix flake check`).
     workspaceTests = pkgs: pkgs.rustPlatform.buildRustPackage {
       pname = "fbr-ram-downloader-tests";
-      version = "0.1.1";
+      version = "0.1.2";
 
       src = cleanSrc pkgs;
       cargoLock = { lockFile = ./Cargo.lock; };

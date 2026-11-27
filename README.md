@@ -167,7 +167,7 @@ cp target/x86_64-unknown-linux-musl/release/v100-unlock demo/
 - [duggasco/CMP100-210](https://github.com/duggasco/CMP100-210) (PolyForm Noncommercial / CC BY-NC): GV100 `PMC_BOOT_0` canary, write-only `0x98BC98`, per-partition PLL layout (no code included).
 - `v100-overclock`: GV100 live `0x98BC98` verification, CUDA-free DRAM cycle counter meter, and 4× V100-SXM2-16GB qualification.
 
-Shoutouts: Helix Collective, Nous Research, Eth Strat, Amp Code, Jensen Huang, Nvidia, Franck (TP art), Onslaught, Defame, Gina, Ziggy, Rob, Gary, Jeeva, DNV.
+Greetings: Amp Code, Defame, DNV, Eth Strat, Franck (TP art), Gary, Gina, Helix Collective, Jeeva, Jensen Huang, Manik, Nvidia, Nous Research, Onslaught, Rob, Thinking Machines, Ziggy.
 
 <3 FBR ROM
 
