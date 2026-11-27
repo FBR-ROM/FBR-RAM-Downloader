@@ -48,7 +48,7 @@ const BAR_WIDTH: usize = 44;
 ///
 /// EDIT THIS to add your own text. It scrolls left on a loop; separate
 /// entries with "  \u{2022}  " (or anything you like). Keep it one line.
-pub const GREETINGS: &str = "  MUSIC: \"ARCANE MAGIC\"  \u{2022}  CREDITS:  \u{2022}  AMOGH MUNIKOTE  \u{2022}  ASM64 HOOLIGAN  \u{2022}  CACHENETICS  \u{2022}  DUGGASCO  \u{2022}  FBR ROM  \u{2022}  ALL THE RAM HUNTERS  \u{2022}  SHOUTOUTS:  \u{2022}  HELIX COLLECTIVE  \u{2022}  NOUS RESEARCH  \u{2022}  ETH STRAT  \u{2022}  AMP CODE  \u{2022}  JENSEN HUANG  \u{2022}  NVIDIA  \u{2022}  FRANCK (TP ART)  \u{2022}  ONSLAUGHT  \u{2022}  DEFAME  \u{2022}  GINA  \u{2022}  ZIGGY  \u{2022}  ROB  \u{2022}  GARY  \u{2022}  JEEVA  \u{2022}  DNV  \u{2022}  ";
+pub const GREETINGS: &str = "  Greetings: Amp Code, Defame, DNV, Eth Strat, Franck (TP art), Gary, Gina, Helix Collective, Jeeva, Jensen Huang, Manik, Nvidia, Nous Research, Onslaught, Rob, Thinking Machines, Ziggy.  ";
 
 /// Model height breakpoints in cells, largest first: `(ref_width, rows)`.
 /// The model region spans the full inner width (`1..w-1`) so wide models
@@ -855,7 +855,7 @@ impl Cracktro {
         cv.set(w - 1, row, '┘', p.colors[1], false);
         // Straight scroller along the border, chars color-cycled through the
         // palette shades — the 4-color take on the classic C64 scroller.
-        let speed = 10.0; // chars/sec
+        let speed = 14.0; // chars/sec
         let len = GREETINGS.chars().count();
         let offset = ((t * speed) as usize) % len;
         let chars: Vec<char> = GREETINGS.chars().collect();

@@ -288,7 +288,7 @@ checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
 
 [[package]]
 name = "fbr-ram-downloader"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "crossterm",
  "libc",
@@ -1224,7 +1224,7 @@ checksum = "1fc81956842c57dac11422a97c3b8195a1ff727f06e85c84ed2e8aa277c9a0fd"
 
 [[package]]
 name = "v100-unlock"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
 ]
