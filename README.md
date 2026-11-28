@@ -1,4 +1,4 @@
-*** we recommend disabling ecc to avoid page retirement if you land on a bad clock ***
+**we recommend disabling ecc to avoid page retirement if you land on a bad clock**
 # FBR RAM Downloader NVIDIA
 
 Live HBM2 memory clock unlock for every NVIDIA Tesla V100 in a machine — no VBIOS flash, no driver reload, no reboot — wrapped in a 4-color cracktro, with a `--headless` mode for scripts and systemd.
