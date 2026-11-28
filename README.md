@@ -5,7 +5,7 @@ Live HBM2 memory clock unlock for every NVIDIA Tesla V100 in a machine — no VB
 
 Greetings: Amp Code, Defame, DNV, Eth Strat, Franck (TP art), Gary, Gina, Helix Collective, Jeeva, Jensen Huang, Manik, Nvidia, Nous Research, Onslaught, Rob, Stableshaman, Thinking Machines, Ziggy.
 
-![Uploading demo-green.gif…]()
+![FBR RAM Downloader](preview.gif)
 
 ## Quick start
 
